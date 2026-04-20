@@ -12,7 +12,7 @@ authors = [
 ]
 dependencies = [
     "aiohttp>=3.8,<4",
-    "av>=15,<18",
+    "av>=17.0.1,<18",
     "bdfparser>=2,<3",
     "bbcode>=1.1,<2",
     "filetype>=1.2,<2",
