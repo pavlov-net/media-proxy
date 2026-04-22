@@ -32,7 +32,7 @@ deno = [
     "deno>=2.0.0",  # Bundled Deno binary for yt-dlp EJS (not needed when deno is system-installed)
 ]
 dev = [
-    "mypy>=1.20.1,<2",
+    "mypy>=1.20.2,<2",
     "pyright>=1.1,<2",
     "types-PyYAML>=6,<7",
     "ruff>=0.15.11,<1",
