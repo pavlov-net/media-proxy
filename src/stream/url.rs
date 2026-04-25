@@ -24,6 +24,12 @@ pub fn rewrite_internal(url: &str, server_host: &str) -> String {
     }
 }
 
+/// True for `http://` / `https://` URLs. Used by ffmpeg-arg builders that
+/// want to attach HTTP-protocol options (`-headers`, `-reconnect`).
+pub fn is_http_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 /// Decode percent-escapes in a source URL. Safe to apply before classification
 /// since classification only inspects scheme + extension.
 pub fn percent_decode(s: &str) -> String {
@@ -104,9 +110,13 @@ pub fn as_local_path(url: &str) -> Option<PathBuf> {
 
 impl UrlKind {
     /// True if the orchestrator should dispatch this URL through the video
-    /// (ffmpeg-sidecar) pipeline instead of the still-image pipeline.
+    /// pipeline (resolver + ffmpeg). `HttpUnknown` is included so yt-dlp
+    /// pages reach the resolver and bare HTTP streams reach ffmpeg.
     pub fn is_video(&self) -> bool {
-        matches!(self, Self::DirectVideo | Self::StreamingProtocol(_))
+        matches!(
+            self,
+            Self::DirectVideo | Self::StreamingProtocol(_) | Self::HttpUnknown
+        )
     }
 
     /// True if the resolver can short-circuit — the URL already points at
@@ -149,6 +159,7 @@ mod tests {
         let k = classify("https://www.youtube.com/watch?v=abc");
         assert_eq!(k, UrlKind::HttpUnknown);
         assert!(!k.is_direct_media());
+        assert!(k.is_video());
     }
 
     #[test]

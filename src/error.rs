@@ -166,6 +166,18 @@ impl From<reqwest::Error> for ResolverError {
     }
 }
 
+impl From<crate::yt_dlp::YtDlpError> for ResolverError {
+    fn from(e: crate::yt_dlp::YtDlpError) -> Self {
+        use crate::yt_dlp::YtDlpError;
+        match e {
+            YtDlpError::Timeout => Self::Unavailable("yt-dlp timeout".into()),
+            YtDlpError::Spawn(io) => Self::Unavailable(format!("yt-dlp spawn: {io}")),
+            YtDlpError::Failed { message, .. } => Self::Unavailable(message),
+            YtDlpError::InvalidJson(e) => Self::InvalidResponse(format!("yt-dlp json: {e}")),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum StreamError {
     #[error(transparent)]

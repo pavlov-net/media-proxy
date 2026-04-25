@@ -9,6 +9,7 @@
 //!   `pts_time:<float>`.
 
 use std::process::Stdio;
+use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -18,22 +19,41 @@ use tracing::{debug, warn};
 
 use crate::error::VideoError;
 use crate::platform::HwBackend;
+use crate::stream::url::is_http_url;
 
-/// Output of the ffmpeg subprocess: one `Vec<u8>` per frame, plus an
-/// optional PTS if showinfo parsing succeeded.
+/// Detects hung connections so reconnect can fire instead of stalling.
+const HTTP_RW_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub struct FfmpegFrame {
     pub rgb24: Bytes,
     pub pts_s: Option<f64>,
 }
 
+/// Input source for ffmpeg. `CachedLooping` ties together `cache:` (which
+/// makes the input seekable) and `-stream_loop -1` (which needs that
+/// seekability) so they can't be enabled independently and silently fail.
+pub enum FfmpegInput<'a> {
+    Direct(&'a str),
+    CachedLooping(&'a str),
+}
+
+impl FfmpegInput<'_> {
+    fn url(&self) -> &str {
+        match self {
+            Self::Direct(u) | Self::CachedLooping(u) => u,
+        }
+    }
+}
+
 pub struct FfmpegArgs<'a> {
-    pub input_url: &'a str,
+    pub input: FfmpegInput<'a>,
     pub filter_graph: &'a str,
     pub output_width: u32,
     pub output_height: u32,
     pub hw: Option<HwBackend>,
-    pub extra_input_args: Vec<String>,
+    /// CRLF-joined `K: V` pairs for ffmpeg's `-headers`, if any.
+    pub http_headers: Option<String>,
 }
 
 /// Spawn ffmpeg and stream RGB24 frames over a channel. Caller drops the
@@ -53,11 +73,35 @@ pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<mpsc::Receiver<FfmpegF
         cmd.arg("-hwaccel").arg(b.as_ffmpeg_flag());
     }
 
-    for extra in &args.extra_input_args {
-        cmd.arg(extra);
+    // Without reconnect, a mid-stream TLS reset is treated as EOF and ffmpeg
+    // exits 0 with a partial file. The `cache:` wrapper doesn't shield this.
+    if is_http_url(args.input.url()) {
+        let timeout_us = HTTP_RW_TIMEOUT.as_micros().to_string();
+        cmd.args([
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_at_eof",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+            "-rw_timeout",
+            &timeout_us,
+        ]);
+    }
+    if matches!(args.input, FfmpegInput::CachedLooping(_)) {
+        cmd.args(["-stream_loop", "-1"]);
+    }
+    if let Some(headers) = &args.http_headers {
+        cmd.arg("-headers").arg(headers);
     }
 
-    cmd.arg("-i").arg(args.input_url);
+    let input_arg = match &args.input {
+        FfmpegInput::Direct(u) => (*u).to_string(),
+        FfmpegInput::CachedLooping(u) => format!("cache:{u}"),
+    };
+    cmd.arg("-i").arg(&input_arg);
 
     // Showinfo first so PTS logs come out before the output filters.
     let vf = format!("{},showinfo", args.filter_graph);

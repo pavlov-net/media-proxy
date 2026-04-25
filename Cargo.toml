@@ -52,6 +52,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 wide = "1"
 parking_lot = "0.12"
 rand = "0.9"
+which = "8"
 
 # Media — Phase 1. We spawn ffmpeg via direct `tokio::process::Command`;
 # `ffmpeg-sidecar` was considered but its auto-download + progress-parse
@@ -85,8 +86,22 @@ lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 
+# Release-shaped profile without LTO — roughly half the build time of
+# `release`, runtime perf within a few percent. Use during iteration when
+# you want production codegen but don't need a shipping binary.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"
+
 [profile.dev]
 opt-level = 1
+
+# Compile dependencies at full optimization once, then cache. Our crate
+# stays at `opt-level = 1` (above) so incremental rebuilds remain cheap.
+[profile.dev.package."*"]
+opt-level = 3
 
 [lints.rust]
 unsafe_code = "forbid"

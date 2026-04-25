@@ -14,6 +14,7 @@ pub mod resolver;
 pub mod stream;
 pub mod telemetry;
 pub mod video;
+pub mod yt_dlp;
 
 pub use config::Config;
 pub use error::{Error, Result};

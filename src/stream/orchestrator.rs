@@ -150,7 +150,14 @@ async fn run_with_retry(
         };
 
         match outcome {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                // Non-cached video can only loop by rebuilding from scratch.
+                if fields.r#loop {
+                    attempt = 0;
+                    continue;
+                }
+                return Ok(());
+            }
             Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
                 let delay = backoff(attempt);
                 warn!(attempt, error = %e, backoff_ms = delay.as_millis() as u64, "stream retry");

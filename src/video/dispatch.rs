@@ -27,7 +27,7 @@ use crate::error::StreamError;
 use crate::resolver::{ResolveRequest, Resolver};
 use crate::stream::frame_source::{FrameSource, RgbFrame, VideoSource};
 use crate::video::filter_graph::{FilterGraphParams, build_filter_graph};
-use crate::video::subprocess::{FfmpegArgs, FfmpegFrame, spawn_ffmpeg};
+use crate::video::subprocess::{FfmpegArgs, FfmpegFrame, FfmpegInput, spawn_ffmpeg};
 use crate::video::{hwaccel, timing};
 
 /// Fallback delay when neither PTS deltas nor an advertised fps are
@@ -52,24 +52,23 @@ pub async fn build_video_source(
     let hw_backend = hwaccel::pick_for(fields.hw);
     let filter_graph = build_target_only_graph(fields);
 
-    let extra_input_args = http_headers_as_args(&resolved.headers);
-
-    // Wrap small-and-looping media through ffmpeg's `cache:` protocol so
-    // repeated plays of the same YouTube clip hit the local cache.
-    let input_url = if resolved.should_cache(fields.r#loop, config.youtube.cache.max_size) {
-        debug!(src = %fields.source, "enabling ffmpeg cache: protocol");
-        format!("cache:{}", resolved.stream_url)
+    // `cache:` makes the input seekable so ffmpeg's `-stream_loop -1` can
+    // rewind in-place. For large or non-looping media, the orchestrator
+    // rebuilds the whole source from scratch instead.
+    let input = if resolved.should_cache(fields.r#loop, config.youtube.cache.max_size) {
+        debug!(src = %fields.source, "ffmpeg cache: + stream_loop");
+        FfmpegInput::CachedLooping(&resolved.stream_url)
     } else {
-        resolved.stream_url.clone()
+        FfmpegInput::Direct(&resolved.stream_url)
     };
 
     let ffmpeg_rx = spawn_ffmpeg(FfmpegArgs {
-        input_url: &input_url,
+        input,
         filter_graph: &filter_graph,
         output_width: fields.width,
         output_height: fields.height,
         hw: hw_backend,
-        extra_input_args,
+        http_headers: format_http_headers(&resolved.headers),
     })
     .await?;
 
@@ -97,13 +96,9 @@ fn is_unreliable_pts(src_url: &str) -> bool {
     lower.ends_with(".mjpeg") || lower.ends_with(".mjpg") || lower.contains("mjpg_streamer")
 }
 
-fn http_headers_as_args(headers: &std::collections::HashMap<String, String>) -> Vec<String> {
-    if headers.is_empty() {
-        return Vec::new();
-    }
-    // ffmpeg expects CRLF-joined `K: V` pairs in `-headers`, ending with CRLF.
-    // Skip any entry whose name/value contains control chars — otherwise a
-    // malicious resolver response could inject extra headers.
+/// Skips entries whose name/value contains control chars to prevent a
+/// malicious resolver response from injecting extra headers.
+fn format_http_headers(headers: &std::collections::HashMap<String, String>) -> Option<String> {
     let mut joined = String::new();
     for (k, v) in headers {
         let k = k.trim();
@@ -113,10 +108,7 @@ fn http_headers_as_args(headers: &std::collections::HashMap<String, String>) -> 
         }
         joined.push_str(&format!("{k}: {v}\r\n"));
     }
-    if joined.is_empty() {
-        return Vec::new();
-    }
-    vec!["-headers".into(), joined]
+    (!joined.is_empty()).then_some(joined)
 }
 
 fn contains_control(s: &str) -> bool {

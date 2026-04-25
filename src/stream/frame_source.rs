@@ -5,15 +5,12 @@
 
 use bytes::Bytes;
 
-/// A frame emitted by a `FrameSource`: RGB888 bytes + the post-processing
-/// delay hint the producer wants the consumer to respect.
 #[derive(Debug, Clone)]
 pub struct RgbFrame {
     pub rgb888: Bytes,
     pub delay_ms: f32,
 }
 
-/// Enum over the three concrete source types.
 pub enum FrameSource {
     Video(VideoSource),
     StaticImage(StaticImageSource),
@@ -25,19 +22,13 @@ pub struct VideoSource {
 }
 
 pub struct StaticImageSource {
-    /// Pre-rendered RGB888 for the target size. Re-emitted forever (for
-    /// looping stills) or once (for single-shot).
     pub frame: Bytes,
-    pub r#loop: bool,
     pub emitted: bool,
 }
 
 pub struct AnimatedSource {
-    /// Pre-rendered RGB888 frames at the target size + their delays.
     pub frames: std::sync::Arc<crate::image::animated::cache::CachedSequence>,
-    pub r#loop: bool,
     pub cursor: usize,
-    pub loops_done: u32,
 }
 
 impl FrameSource {
@@ -45,7 +36,7 @@ impl FrameSource {
         match self {
             Self::Video(v) => v.rx.recv().await,
             Self::StaticImage(s) => {
-                if !s.r#loop && s.emitted {
+                if s.emitted {
                     return None;
                 }
                 s.emitted = true;
@@ -55,19 +46,29 @@ impl FrameSource {
                 })
             }
             Self::Animated(a) => {
-                if a.frames.frames.is_empty() {
-                    return None;
-                }
                 if a.cursor >= a.frames.frames.len() {
-                    if !a.r#loop {
-                        return None;
-                    }
-                    a.cursor = 0;
-                    a.loops_done += 1;
+                    return None;
                 }
                 let (rgb888, delay_ms) = a.frames.frames[a.cursor].clone();
                 a.cursor += 1;
                 Some(RgbFrame { rgb888, delay_ms })
+            }
+        }
+    }
+
+    /// Reset iteration state so the next `next()` re-emits from the start.
+    /// Returns `false` for `Video` — ffmpeg owns its own loop via
+    /// `-stream_loop -1`, the orchestrator handles the rebuild path.
+    pub fn try_rewind(&mut self) -> bool {
+        match self {
+            Self::Video(_) => false,
+            Self::StaticImage(s) => {
+                s.emitted = false;
+                true
+            }
+            Self::Animated(a) => {
+                a.cursor = 0;
+                true
             }
         }
     }

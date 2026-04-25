@@ -36,6 +36,10 @@ pub async fn run_native(
         let frame = match pulled {
             Ok(Some(f)) => f,
             Ok(None) => {
+                if fields.r#loop && source.try_rewind() {
+                    debug!(emitted, "native source rewound for loop");
+                    continue;
+                }
                 debug!(emitted, "native source exhausted");
                 return Ok(());
             }

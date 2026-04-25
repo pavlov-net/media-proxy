@@ -323,7 +323,7 @@ impl Default for PlaybackStillConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResolverConfig {
     /// URL of the addon-side resolver. When unset, resolver requests fail
     /// closed (used in tests with the fake resolver).
@@ -332,8 +332,20 @@ pub struct ResolverConfig {
     pub timeout_ms: u64,
 }
 
+impl Default for ResolverConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            timeout_ms: default_resolver_timeout(),
+        }
+    }
+}
+
 fn default_resolver_timeout() -> u64 {
-    15_000
+    // Cold-start budget: Python interpreter (~300ms) + yt-dlp imports
+    // (~500ms) + Deno spawn (~1s) + youtubei API + EJS solve (~2-4s).
+    // Warm runs land near 2s; first call after install can be 5-10s.
+    30_000
 }
 
 fn default_true() -> bool {
@@ -392,5 +404,16 @@ mod tests {
         assert!(c.net.spread_packets);
         assert_eq!(c.net.spread_max_fps, 60);
         assert_eq!(c.playback_still.redundancy, 3);
+        assert!(c.resolver.url.is_none());
+        assert_eq!(c.resolver.timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn defaults_survive_figment_round_trip() {
+        let fig = Figment::from(Serialized::defaults(Config::default()));
+        let cfg: Config = fig.extract().expect("extract");
+        assert_eq!(cfg.resolver.timeout_ms, 30_000);
+        assert_eq!(cfg.hw.prefer, "auto");
+        assert!(cfg.youtube.cache.enabled);
     }
 }

@@ -48,9 +48,7 @@ pub async fn build_image_source(
         let seq = animated::dispatch(bytes, &params, frame_cache).map_err(StreamError::Image)?;
         return Ok(FrameSource::Animated(AnimatedSource {
             frames: seq,
-            r#loop: fields.r#loop,
             cursor: 0,
-            loops_done: 0,
         }));
     }
 
@@ -67,7 +65,6 @@ pub async fn build_image_source(
     let rgb888 = ImagePipeline::run(decoded, &params).map_err(StreamError::Image)?;
     Ok(FrameSource::StaticImage(StaticImageSource {
         frame: bytes::Bytes::from(rgb888),
-        r#loop: fields.r#loop,
         emitted: false,
     }))
 }

@@ -16,13 +16,20 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::resolver::{HttpResolver, Resolver};
+use crate::resolver::{HttpResolver, NoopResolver, PassthroughLayer, Resolver, SubprocessResolver};
 use crate::stream::Orchestrator;
+use crate::yt_dlp::YtDlp;
 use crate::{Config, Result};
 
 pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     let config = Arc::new(config);
     let resolver: Arc<dyn Resolver> = build_resolver(&config)?;
+
+    // Warm hwaccel probe off the request path (~25-100ms per backend).
+    tokio::task::spawn_blocking(|| {
+        let probed = crate::video::hwaccel::available();
+        info!(?probed, "hwaccel probe complete");
+    });
 
     let orch = Arc::new(Orchestrator::new(config.clone(), resolver));
     let state = Arc::new(AppState {
@@ -49,17 +56,20 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     Ok(())
 }
 
+/// Explicit `resolver.url` wins; otherwise auto-detect local `yt-dlp`;
+/// otherwise fail closed. Always wrapped in `PassthroughLayer` so direct
+/// media short-circuits.
 fn build_resolver(config: &Arc<Config>) -> Result<Arc<dyn Resolver>> {
-    match &config.resolver.url {
-        Some(url) => {
-            let r = HttpResolver::new(url.clone(), Duration::from_millis(config.resolver.timeout_ms))
-                .map_err(crate::error::Error::Resolver)?;
-            Ok(Arc::new(r) as Arc<dyn Resolver>)
-        }
-        None => {
-            // No resolver configured — use a passthrough fake (only safe for
-            // direct URLs; anything needing resolution will error).
-            Ok(Arc::new(crate::resolver::FakeResolver::new().with_passthrough()) as Arc<dyn Resolver>)
-        }
-    }
+    let timeout = Duration::from_millis(config.resolver.timeout_ms);
+    let inner: Box<dyn Resolver> = if let Some(url) = &config.resolver.url {
+        info!(%url, "resolver: http sidecar");
+        Box::new(HttpResolver::new(url.clone(), timeout).map_err(crate::error::Error::Resolver)?)
+    } else if let Some(yt_dlp) = YtDlp::detect() {
+        info!(bin = %yt_dlp.bin().display(), "resolver: yt-dlp subprocess");
+        Box::new(SubprocessResolver::new(yt_dlp, timeout))
+    } else {
+        info!("resolver: none (yt-dlp not on PATH and resolver.url unset; non-direct URLs will fail)");
+        Box::new(NoopResolver)
+    };
+    Ok(Arc::new(PassthroughLayer::new(inner)))
 }

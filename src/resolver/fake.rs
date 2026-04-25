@@ -1,4 +1,5 @@
-//! Fake resolver used in integration tests: returns whatever URL you hand it.
+//! Fake resolver for integration tests: canned responses for registered
+//! URLs, optional passthrough for the rest.
 
 use std::collections::HashMap;
 
@@ -7,7 +8,6 @@ use async_trait::async_trait;
 use super::{ResolveRequest, ResolveResponse, Resolver};
 use crate::error::ResolverError;
 
-/// Maps input URLs → canned `ResolveResponse` for tests.
 #[derive(Default)]
 pub struct FakeResolver {
     map: HashMap<String, ResolveResponse>,
@@ -37,14 +37,7 @@ impl Resolver for FakeResolver {
             return Ok(resp.clone());
         }
         if self.passthrough {
-            return Ok(ResolveResponse {
-                stream_url: req.url,
-                headers: Default::default(),
-                fps: None,
-                codec: None,
-                filesize: None,
-                expires_at: None,
-            });
+            return Ok(ResolveResponse::passthrough(req.url));
         }
         Err(ResolverError::Unavailable(format!(
             "fake resolver has no entry for: {}",
