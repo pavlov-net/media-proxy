@@ -2,25 +2,28 @@
 
 Stream videos, GIFs, still images, and YouTube content to tiny LED/LCD displays (e.g., ESPHome devices using DDP) with smart resizing, optional color-range expansion, and packet pacing. Exposes a WebSocket control API and pushes pixel data over UDP using the DDP format.
 
-Available as a Home Assistant add-on or standalone Python application.
+Available as a Home Assistant add-on or standalone Rust binary.
 
 ---
 
 ## What you get
 
-- Unified HTTP/WebSocket server using **aiohttp** (default port `8788`) with WebSocket control API and REST endpoints.
-- Video decoding via PyAV/FFmpeg with auto-rebuilding filter graph (handles rotation, SAR/PAR, format changes).
+- Unified HTTP/WebSocket server (default port `8788`) with WebSocket control API and REST endpoints.
+- Video decoding via subprocess `ffmpeg` with hardware acceleration (CUDA, QSV, VAAPI, VideoToolbox, D3D11VA).
 - Smart fit modes (`cover`, `pad`, `auto`), optional TV→PC range expansion, and automatic black-bar crop.
-- Image processing via **Pillow** for stills, animated GIFs, PNGs (APNG), and WebP with frame caching.
-- UDP DDP sender with optional packet spreading and pacing for smoother delivery.  
+- Static + animated image pipeline (PNG, JPEG, GIF, APNG, WebP) with disposal/blend handling and an LRU frame cache.
+- UDP DDP sender with optional packet spreading, pacing, and still-frame redundancy.
+- Companion `ddp-view` binary — a terminal DDP receiver that renders 64×64 frames using half-block characters, useful for end-to-end testing without an LED panel.
 
 ---
 
 ## Requirements
 
-- Python 3.12+ with FFmpeg support
+- Rust 1.95+ (edition 2024) — only needed to build from source
+- `ffmpeg` on `PATH` for video sources
 - Network access to your displays (UDP, typically port 4048)
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip for dependency management
+
+YouTube resolution + Deno EJS solver live in the companion [`media-proxy-addon`](https://github.com/stuartparmenter/media-proxy-addon); the core does not bundle yt-dlp.
 
 ---
 
@@ -37,30 +40,26 @@ Available as a Home Assistant add-on or standalone Python application.
    - Add configuration (see below).
    - Click **Start**, then check the **Log** tab to verify it's running.
 
-### Standalone Python Application
+### Standalone Binary
 
-#### Using uv (Recommended)
+```bash
+git clone https://github.com/stuartparmenter/media-proxy.git
+cd media-proxy
+cargo build --release
+./target/release/media-proxy --host 0.0.0.0 --port 8788
+```
 
-1. **Install uv:**
-   ```bash
-   # macOS/Linux
-   curl -LsSf https://astral.sh/uv/install.sh | sh
+CLI flags:
 
-   # Windows
-   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-   ```
+```
+--host <HOST>            [default: 0.0.0.0]
+--port <PORT>            [default: 8788]
+--config <CONFIG>        Path to YAML/TOML/JSON config file (optional)
+--log-level <LEVEL>      debug | info | warning | error | critical
+```
 
-2. **Clone and setup:**
-   ```bash
-   git clone https://github.com/stuartparmenter/media-proxy.git
-   cd media-proxy
-   uv sync
-   ```
-
-3. **Run the server:**
-   ```bash
-   uv run python src/run.py --host 0.0.0.0 --port 8788
-   ```
+Configuration also accepts `MEDIA_PROXY__SECTION__KEY=value` env-var overrides
+(e.g. `MEDIA_PROXY__IMAGE__GAMMA_CORRECT=true`).
 
 ---
 
@@ -405,24 +404,24 @@ curl http://localhost:8788/api/internal/placeholder/600x400/orange.png?text=Test
 
 ## Using it with ESPHome
 
-See: [lvgl-ddp-stream](https://github.com/stuartparmenter/lvgl-ddp-stream) for ESPHome integration examples.  
+See: [lvgl-ddp-stream](https://github.com/stuartparmenter/lvgl-ddp-stream) for ESPHome integration examples.
 
 ---
 
 ## Ports & networking
 
-- **WebSocket control:** TCP `8788` (configurable).  
-- **DDP to devices:** UDP from the add-on to your displays on the port you specify per stream.  
+- **WebSocket control:** TCP `8788` (configurable).
+- **DDP to devices:** UDP from the add-on to your displays on the port you specify per stream.
 
 ---
 
 ## Logs & troubleshooting
 
-- Open the add-on’s **Log** tab to view server output.  
-- You’ll see decode path selection, filter-graph rebuilds, and metrics (fps, pps, jitter, drops).  
-- Common issues:  
-  - **No frames until page reload:** Ensure your client starts streaming after WebSocket connect.  
-  - **YouTube not playing:** The add-on must be able to reach YouTube; outbound internet must be allowed.  
-  - **Device not receiving frames:** Check UDP reachability and that pixel format matches your device.  
+- Open the add-on’s **Log** tab to view server output.
+- You’ll see decode path selection, filter-graph rebuilds, and metrics (fps, pps, jitter, drops).
+- Common issues:
+  - **No frames until page reload:** Ensure your client starts streaming after WebSocket connect.
+  - **YouTube not playing:** The add-on must be able to reach YouTube; outbound internet must be allowed.
+  - **Device not receiving frames:** Check UDP reachability and that pixel format matches your device.
 
 ---
