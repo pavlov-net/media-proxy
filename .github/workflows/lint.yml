@@ -23,6 +23,9 @@ jobs:
           toolchain: "1.95"
           components: rustfmt, clippy
 
+      - name: Install mold linker
+        run: sudo apt-get update && sudo apt-get install -y mold
+
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
