@@ -4,6 +4,9 @@
 //! pattern-match on one of `Video`, `StaticImage`, `Animated`.
 
 use bytes::Bytes;
+use tokio::sync::oneshot;
+
+use crate::error::{MediaError, StreamError, VideoError};
 
 #[derive(Debug, Clone)]
 pub struct RgbFrame {
@@ -19,6 +22,22 @@ pub enum FrameSource {
 
 pub struct VideoSource {
     pub rx: tokio::sync::mpsc::Receiver<RgbFrame>,
+    /// Filled by the ffmpeg-wait task with `Ok(())` on clean exit or a
+    /// classified `MediaError` (e.g. "Server returned 403 Forbidden") on
+    /// failure. `take_error()` consumes this after `next()` returns `None`.
+    completion: Option<oneshot::Receiver<Result<(), MediaError>>>,
+}
+
+impl VideoSource {
+    pub fn new(
+        rx: tokio::sync::mpsc::Receiver<RgbFrame>,
+        completion: oneshot::Receiver<Result<(), MediaError>>,
+    ) -> Self {
+        Self {
+            rx,
+            completion: Some(completion),
+        }
+    }
 }
 
 pub struct StaticImageSource {
@@ -53,6 +72,24 @@ impl FrameSource {
                 a.cursor += 1;
                 Some(RgbFrame { rgb888, delay_ms })
             }
+        }
+    }
+
+    /// After `next()` returns `None`, ask the source whether it ended
+    /// cleanly or with an error. Static and animated sources never error;
+    /// for video, this awaits the ffmpeg exit-status oneshot and returns
+    /// the classified error if any.
+    pub async fn take_error(&mut self) -> Option<StreamError> {
+        match self {
+            Self::Video(v) => {
+                let comp = v.completion.take()?;
+                match comp.await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(StreamError::Video(VideoError::Media(e))),
+                    Err(_) => None,
+                }
+            }
+            Self::StaticImage(_) | Self::Animated(_) => None,
         }
     }
 

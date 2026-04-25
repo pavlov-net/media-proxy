@@ -62,7 +62,7 @@ pub async fn build_video_source(
         FfmpegInput::Direct(&resolved.stream_url)
     };
 
-    let ffmpeg_rx = spawn_ffmpeg(FfmpegArgs {
+    let handles = spawn_ffmpeg(FfmpegArgs {
         input,
         filter_graph: &filter_graph,
         output_width: fields.width,
@@ -82,9 +82,9 @@ pub async fn build_video_source(
     let unreliable_pts = is_unreliable_pts(&fields.source);
 
     let (frame_tx, frame_rx) = mpsc::channel::<RgbFrame>(8);
-    tokio::spawn(convert_frames(ffmpeg_rx, frame_tx, avg_ms, unreliable_pts));
+    tokio::spawn(convert_frames(handles.frames, frame_tx, avg_ms, unreliable_pts));
 
-    Ok(FrameSource::Video(VideoSource { rx: frame_rx }))
+    Ok(FrameSource::Video(VideoSource::new(frame_rx, handles.completion)))
 }
 
 /// URL-level heuristic for formats that deliver synthetic PTS (MJPEG over

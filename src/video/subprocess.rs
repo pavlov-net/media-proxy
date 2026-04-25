@@ -9,17 +9,36 @@
 //!   `pts_time:<float>`.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::error::VideoError;
+use crate::error::{MediaError, VideoError};
 use crate::platform::HwBackend;
 use crate::stream::url::is_http_url;
+
+#[derive(Debug, Clone, Copy)]
+enum ErrSeverity {
+    Permanent,
+    Transient,
+}
+
+type LastStderrErr = Arc<Mutex<Option<(ErrSeverity, String)>>>;
+
+/// Channels handed back to the dispatch layer when ffmpeg starts. The
+/// `completion` receiver yields the final result once ffmpeg exits — `Ok`
+/// for clean exit, `Err(MediaError)` carrying the classified stderr line
+/// (e.g. "Server returned 403 Forbidden") for failures.
+pub struct FfmpegHandles {
+    pub frames: mpsc::Receiver<FfmpegFrame>,
+    pub completion: oneshot::Receiver<Result<(), MediaError>>,
+}
 
 /// Detects hung connections so reconnect can fire instead of stalling.
 const HTTP_RW_TIMEOUT: Duration = Duration::from_secs(10);
@@ -58,7 +77,8 @@ pub struct FfmpegArgs<'a> {
 
 /// Spawn ffmpeg and stream RGB24 frames over a channel. Caller drops the
 /// channel to stop.
-pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<mpsc::Receiver<FfmpegFrame>, VideoError> {
+pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoError> {
+    let source_url = args.input.url().to_string();
     let frame_size = (args.output_width as usize) * (args.output_height as usize) * 3;
 
     let mut cmd = Command::new("ffmpeg");
@@ -133,19 +153,53 @@ pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<mpsc::Receiver<FfmpegF
 
     let (tx, rx) = mpsc::channel::<FfmpegFrame>(8);
 
+    // Shared slot the stderr reader fills with the most relevant ffmpeg
+    // error line (first permanent wins; transient is overwritten freely).
+    // The wait task reads it on exit to construct a structured error.
+    let last_err: LastStderrErr = Arc::new(Mutex::new(None));
+
     // Collect PTS values from stderr into a shared queue.
     let (pts_tx, pts_rx) = mpsc::channel::<f64>(64);
-    tokio::spawn(stderr_reader(stderr, pts_tx));
+    tokio::spawn(stderr_reader(stderr, pts_tx, last_err.clone()));
 
     tokio::spawn(frame_reader(stdout, frame_size, tx, pts_rx));
 
+    let (completion_tx, completion_rx) = oneshot::channel();
     tokio::spawn(async move {
-        if let Ok(status) = child.wait().await {
-            debug!(%status, "ffmpeg exited");
-        }
+        let status = child.wait().await;
+        let last = last_err.lock().take();
+        let result: Result<(), MediaError> = match status {
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => {
+                let (message, retryable) = match last {
+                    Some((ErrSeverity::Permanent, m)) => (m, false),
+                    Some((ErrSeverity::Transient, m)) => (m, true),
+                    // No classified line — treat as transient and let the
+                    // orchestrator's retry budget cap it.
+                    None => (format!("ffmpeg exited {s}"), true),
+                };
+                debug!(%s, retryable, %message, "ffmpeg exited with error");
+                Err(MediaError::Network {
+                    source_url: source_url.clone(),
+                    message,
+                    error_code: s.code(),
+                    retryable,
+                })
+            }
+            Err(e) => Err(MediaError::Network {
+                source_url: source_url.clone(),
+                message: format!("waiting for ffmpeg: {e}"),
+                error_code: None,
+                retryable: true,
+            }),
+        };
+        let _ = completion_tx.send(result);
     });
 
-    Ok(rx)
+    Ok(FfmpegHandles {
+        frames: rx,
+        completion: completion_rx,
+    })
 }
 
 async fn frame_reader(
@@ -173,7 +227,7 @@ async fn frame_reader(
     }
 }
 
-async fn stderr_reader(stderr: ChildStderr, tx: mpsc::Sender<f64>) {
+async fn stderr_reader(stderr: ChildStderr, tx: mpsc::Sender<f64>, last_err: LastStderrErr) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
     loop {
@@ -198,13 +252,15 @@ async fn stderr_reader(stderr: ChildStderr, tx: mpsc::Sender<f64>) {
             continue;
         }
         // Classify common ffmpeg stderr lines so operators don't see every
-        // transient network blip as a `warn!`.
+        // transient network blip as a `warn!`. The classification also feeds
+        // the wait-task's structured error: permanent → non-retryable.
         let lower = trimmed.to_ascii_lowercase();
         if lower.contains("http error 4")
             || lower.contains("server returned 4")
             || lower.contains("invalid data")
         {
             warn!(line = trimmed, "ffmpeg permanent error");
+            record_stderr_err(&last_err, ErrSeverity::Permanent, trimmed);
         } else if lower.contains("http error")
             || lower.contains("i/o error")
             || lower.contains("connection refused")
@@ -212,8 +268,20 @@ async fn stderr_reader(stderr: ChildStderr, tx: mpsc::Sender<f64>) {
             || lower.contains("timed out")
         {
             warn!(line = trimmed, "ffmpeg transient error");
+            record_stderr_err(&last_err, ErrSeverity::Transient, trimmed);
         } else {
             debug!(line = trimmed, "ffmpeg");
         }
     }
+}
+
+/// First permanent line wins; later lines (permanent or transient) are
+/// dropped once a permanent is set. This ensures a 403 line isn't masked
+/// by a later "connection reset" the OS emits as the socket tears down.
+fn record_stderr_err(slot: &LastStderrErr, sev: ErrSeverity, line: &str) {
+    let mut g = slot.lock();
+    if matches!(&*g, Some((ErrSeverity::Permanent, _))) {
+        return;
+    }
+    *g = Some((sev, line.to_string()));
 }

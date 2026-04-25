@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 
 use crate::Config;
 use crate::control::fields::StreamFields;
-use crate::error::StreamError;
+use crate::error::{MediaError, StreamError};
 use crate::image::animated::cache::FrameCache;
 use crate::output::ddp::{DdpKey, DdpRegistry, DdpSender};
 use crate::output::sink::{OutputSink, StreamId};
@@ -22,6 +22,12 @@ use crate::stream::runner;
 /// Upper bound on retry attempts for transient errors (network failure,
 /// YouTube URL expiry, retryable decode faults).
 const MAX_RETRIES: u32 = 3;
+
+/// Stop relooping after this many consecutive iterations produce zero frames.
+/// Catches the case where the source has gone permanently bad (e.g. a video
+/// URL now 403s — ffmpeg exits silently with no frames, the runner returns
+/// `Ok`, and the outer loop would otherwise spin forever).
+const MAX_EMPTY_LOOPS: u32 = 3;
 
 pub struct Orchestrator {
     pub config: Arc<Config>,
@@ -135,6 +141,7 @@ async fn run_with_retry(
     // result instead of re-issuing HEAD requests.
     let kind = crate::stream::probe::probe(&fields.source, &config.net.user_agent).await;
     let mut attempt: u32 = 0;
+    let mut empty_loops: u32 = 0;
     loop {
         let source = match build_source(fields, config, frame_cache, resolver, kind).await {
             Ok(s) => s,
@@ -155,7 +162,37 @@ async fn run_with_retry(
         };
 
         match outcome {
-            Ok(()) => {
+            Ok(emitted) => {
+                if emitted == 0 {
+                    // Source built cleanly but produced no frames — most
+                    // commonly an ffmpeg subprocess that exited because the
+                    // upstream URL returned 4xx/5xx. Non-loop: surface as an
+                    // error instead of silently reporting "stream finished".
+                    // Loop: give up after a few consecutive empties so a
+                    // permanently-broken source doesn't spin forever.
+                    empty_loops += 1;
+                    if !fields.r#loop || empty_loops >= MAX_EMPTY_LOOPS {
+                        return Err(StreamError::Media(MediaError::Network {
+                            source_url: fields.source.clone(),
+                            message: format!(
+                                "source produced no frames over {empty_loops} consecutive attempts"
+                            ),
+                            error_code: None,
+                            retryable: false,
+                        }));
+                    }
+                    let delay = backoff(empty_loops - 1);
+                    warn!(
+                        empty_loops,
+                        backoff_ms = delay.as_millis() as u64,
+                        "source produced no frames, backing off"
+                    );
+                    time::sleep(delay).await;
+                    attempt = 0;
+                    continue;
+                }
+                empty_loops = 0;
+
                 // Non-cached video can only loop by rebuilding from scratch.
                 if fields.r#loop {
                     attempt = 0;

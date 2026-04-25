@@ -22,12 +22,14 @@ use crate::stream::frame_source::{FrameSource, RgbFrame};
 const FRAME_WATCHDOG: Duration = Duration::from_secs(30);
 
 /// Run at the source's native cadence. One frame pulled → one frame emitted,
-/// with timing based on the frame's `delay_ms` hint.
+/// with timing based on the frame's `delay_ms` hint. Returns the number of
+/// frames emitted so the orchestrator can detect a source that died
+/// immediately (e.g. ffmpeg failing on a 403) versus one that ran normally.
 pub async fn run_native(
     mut source: FrameSource,
     sink: &dyn OutputSink,
     fields: &StreamFields,
-) -> Result<(), StreamError> {
+) -> Result<u64, StreamError> {
     let mut seq: u32 = 0;
     let mut next_frame_time = Instant::now();
     let mut emitted = 0u64;
@@ -37,12 +39,16 @@ pub async fn run_native(
         let frame = match pulled {
             Ok(Some(f)) => f,
             Ok(None) => {
+                if let Some(err) = source.take_error().await {
+                    debug!(emitted, %err, "native source ended with error");
+                    return Err(err);
+                }
                 if fields.r#loop && source.try_rewind() {
                     debug!(emitted, "native source rewound for loop");
                     continue;
                 }
                 debug!(emitted, "native source exhausted");
-                return Ok(());
+                return Ok(emitted);
             }
             Err(_) => {
                 warn!("frame watchdog tripped (>30s idle)");
@@ -90,7 +96,7 @@ pub async fn run_paced(
     source: FrameSource,
     sink: &dyn OutputSink,
     fields: &StreamFields,
-) -> Result<(), StreamError> {
+) -> Result<u64, StreamError> {
     let pace_hz = fields.pace.max(1) as f32;
     let ema_alpha = fields.ema.clamp(0.0, 1.0);
     let tick = Duration::from_secs_f32(1.0 / pace_hz);
@@ -99,9 +105,12 @@ pub async fn run_paced(
 
     let producer = async {
         let mut source = source;
+        let mut count: u64 = 0;
         while let Some(f) = source.next().await {
+            count += 1;
             *latest.lock() = Some(f.rgb888);
         }
+        (count, source.take_error().await)
     };
 
     let sampler = async {
@@ -158,11 +167,16 @@ pub async fn run_paced(
         }
     };
 
-    tokio::select! {
-        _ = producer => {},
-        _ = sampler => {},
+    // Sampler runs forever; the select only resolves when the producer
+    // returns (source exhausted or errored).
+    let (count, producer_err): (u64, Option<StreamError>) = tokio::select! {
+        pair = producer => pair,
+        _ = sampler => (0, None),
+    };
+    if let Some(e) = producer_err {
+        return Err(e);
     }
-    Ok(())
+    Ok(count)
 }
 
 /// Update an EMA accumulator from a u8 frame and write the rounded/clamped
