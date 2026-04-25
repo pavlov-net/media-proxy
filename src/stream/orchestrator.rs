@@ -102,6 +102,7 @@ async fn run_stream(
             fields.ddp_port,
             crate::control::fields::output_id_byte(fields.output_id),
             fields.fmt,
+            fields.pace,
             &config,
         )
         .await

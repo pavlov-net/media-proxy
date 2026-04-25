@@ -28,6 +28,7 @@ pub struct DdpSender {
     pixel_format: PixelFormat,
     still_redundancy: u32,
     spread: SpreadCfg,
+    pace_hz: u32,
     metrics: Option<Mutex<Metrics>>,
     seq: Mutex<u8>,
 }
@@ -42,9 +43,21 @@ struct SpreadCfg {
 
 struct Metrics {
     frames: RateMeter,
-    packets: RateMeter,
+    /// Unique packets — one tick per distinct packet (excludes still-frame
+    /// redundancy duplicates). `pkt_jit` is read from this so still-frame
+    /// bursts don't show up as crushed-to-zero jitter.
+    unique_packets: RateMeter,
+    /// Physical UDP sends — one tick per `send_to`. Used for `phy` rate when
+    /// redundancy multiplies the on-wire packet count.
+    physical_packets: RateMeter,
     log_interval: Duration,
     last_log: Instant,
+    /// Lifetime physical sends since stream start.
+    tx_total: u64,
+    /// Last frame's `delay_ms` — for native-mode target FPS.
+    last_delay_ms: f32,
+    /// Did the most recent frame actually engage spreading?
+    spread_active: bool,
 }
 
 impl Metrics {
@@ -52,9 +65,13 @@ impl Metrics {
         let window = log_interval.max(Duration::from_secs(1));
         Self {
             frames: RateMeter::new(window),
-            packets: RateMeter::new(window),
+            unique_packets: RateMeter::new(window),
+            physical_packets: RateMeter::new(window),
             log_interval,
             last_log: Instant::now(),
+            tx_total: 0,
+            last_delay_ms: 0.0,
+            spread_active: false,
         }
     }
 }
@@ -65,6 +82,7 @@ impl DdpSender {
         dest_port: u16,
         output_id: u8,
         pixel_format: PixelFormat,
+        pace_hz: u32,
         config: &Config,
     ) -> Result<Self, OutputError> {
         let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
@@ -95,6 +113,7 @@ impl DdpSender {
             pixel_format,
             still_redundancy: config.playback_still.redundancy,
             spread,
+            pace_hz,
             metrics,
             seq: Mutex::new(1),
         })
@@ -126,25 +145,58 @@ impl DdpSender {
         plan.spacing.is_some().then_some(plan)
     }
 
-    fn record_frame(&self, now: Instant, packets: u32) {
+    fn record_frame(
+        &self,
+        now: Instant,
+        unique_packets: u32,
+        physical_packets: u32,
+        delay_ms: f32,
+        spread_active: bool,
+    ) {
         let Some(m) = &self.metrics else { return };
         let mut m = m.lock();
         m.frames.tick(now);
-        for _ in 0..packets {
-            m.packets.tick(now);
-        }
+        m.unique_packets.tick_n(now, unique_packets);
+        m.physical_packets.tick_n(now, physical_packets);
+        m.tx_total = m.tx_total.saturating_add(physical_packets as u64);
+        m.last_delay_ms = delay_ms;
+        m.spread_active = spread_active;
+
         if now.duration_since(m.last_log) >= m.log_interval {
             let fps = m.frames.rate_hz();
-            let pps = m.packets.rate_hz();
+            let unique_pps = m.unique_packets.rate_hz();
+            let physical_pps = m.physical_packets.rate_hz();
             let frm_jit = m.frames.jitter_ms();
-            let pkt_jit = m.packets.jitter_ms();
+            let pkt_jit = m.unique_packets.jitter_ms();
+            let tx = m.tx_total;
+            let spread = m.spread_active;
+            let last_delay_ms = m.last_delay_ms;
+
+            // pps formatting: surface redundancy multiplier when active.
+            let pps_str = if (physical_pps - unique_pps).abs() > 0.5 {
+                let factor = if unique_pps > 0.0 {
+                    physical_pps / unique_pps
+                } else {
+                    1.0
+                };
+                format!("{unique_pps:.0} ({physical_pps:.0}phy, {factor:.1}x)")
+            } else {
+                format!("{unique_pps:.0}")
+            };
+
+            // Mode tag: pace=NHz vs native (~tgt fps from delay_ms).
+            let mode_str = if self.pace_hz > 0 {
+                format!("pace={}Hz", self.pace_hz)
+            } else {
+                let tgt = 1000.0 / last_delay_ms.max(1.0);
+                format!("native (~{tgt:.1} tgt)")
+            };
+
+            let spread_tag = if spread { " (spread)" } else { "" };
+
             info!(
-                out = self.output_id,
-                fps = format!("{fps:.2}"),
-                pps = format!("{pps:.0}"),
-                frm_jit_ms = format!("{frm_jit:.1}"),
-                pkt_jit_ms = format!("{pkt_jit:.1}"),
-                "ddp metrics"
+                "out={} {} fps={fps:.2} pps={pps_str} pkt_jit={pkt_jit:.1}ms frm_jit={frm_jit:.1}ms tx={tx}{spread_tag}",
+                self.output_id, mode_str
             );
             m.last_log = now;
         }
@@ -166,7 +218,8 @@ impl OutputSink for DdpSender {
 
         let start_seq = *self.seq.lock();
         let mut last_next = start_seq;
-        let mut total_packets: u32 = 0;
+        let mut unique_packets: u32 = 0;
+        let mut physical_packets: u32 = 0;
         let start = Instant::now();
         let mut slot = 0u32;
         let mut group_left = spread_plan.as_ref().map(|p| p.group_n).unwrap_or(1);
@@ -177,8 +230,9 @@ impl OutputSink for DdpSender {
                     warn!(?e, "DDP send failed");
                     return Err(e);
                 }
-                total_packets = total_packets.saturating_add(1);
+                physical_packets = physical_packets.saturating_add(1);
             }
+            unique_packets = unique_packets.saturating_add(1);
             last_next = next;
 
             // Apply spreading between unique-packet groups, not between
@@ -200,7 +254,13 @@ impl OutputSink for DdpSender {
             }
         }
         *self.seq.lock() = last_next;
-        self.record_frame(Instant::now(), total_packets);
+        self.record_frame(
+            Instant::now(),
+            unique_packets,
+            physical_packets,
+            frame.meta.delay_ms,
+            spread_plan.is_some(),
+        );
 
         Ok(())
     }
