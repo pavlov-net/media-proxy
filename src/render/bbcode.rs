@@ -83,9 +83,27 @@ pub fn render_bbcode_text(
 }
 
 fn build_background(width: u32, height: u32, bg: [u8; 3]) -> Vec<u8> {
-    let mut canvas = Vec::with_capacity((width * height * 3) as usize);
-    for _ in 0..(width * height) {
+    let total = (width as usize) * (height as usize) * 3;
+    if bg == [0, 0, 0] {
+        return vec![0u8; total];
+    }
+    // Build one row, then double-up via `extend_from_within` so we copy O(log
+    // height) times instead of O(height) per-pixel `extend_from_slice` calls.
+    let row_len = (width as usize) * 3;
+    let mut canvas = Vec::with_capacity(total);
+    for _ in 0..width {
         canvas.extend_from_slice(&bg);
+    }
+    while canvas.len() < total {
+        let take = (total - canvas.len()).min(canvas.len());
+        let take = (take / row_len) * row_len;
+        if take == 0 {
+            break;
+        }
+        canvas.extend_from_within(0..take);
+    }
+    if canvas.len() < total {
+        canvas.extend_from_within(0..(total - canvas.len()));
     }
     canvas
 }

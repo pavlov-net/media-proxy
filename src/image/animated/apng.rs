@@ -10,7 +10,6 @@
 //! - 0 (SOURCE): replace rect pixels entirely.
 //! - 1 (OVER)  : alpha-blend over existing pixels.
 
-use bytes::Bytes;
 use png::{BlendOp, ColorType, DisposeOp};
 
 use super::{AnimatedFrame, DEFAULT_DELAY_MS, MIN_DELAY_MS};
@@ -26,6 +25,8 @@ pub struct ApngDecoder {
     frame_count: Option<u32>,
     /// Scratch buffer for decoding one sub-frame.
     sub_buf: Vec<u8>,
+    /// Persistent scratch for sub-frame expansion to RGBA8.
+    rgba_sub: Vec<u8>,
 }
 
 impl ApngDecoder {
@@ -64,6 +65,7 @@ impl ApngDecoder {
             frames_read: 0,
             frame_count,
             sub_buf: vec![0u8; buf_size],
+            rgba_sub: Vec::new(),
             reader,
         })
     }
@@ -71,42 +73,36 @@ impl ApngDecoder {
     fn composite_frame(&mut self, fc: png::FrameControl, rgba_sub: &[u8]) {
         let (x, y) = (fc.x_offset, fc.y_offset);
         let (w, h) = (fc.width, fc.height);
+        let canvas_w = self.width;
+        let canvas_h = self.height;
 
-        for row in 0..h {
-            let canvas_y = y + row;
-            if canvas_y >= self.height {
-                break;
-            }
-            for col in 0..w {
-                let canvas_x = x + col;
-                if canvas_x >= self.width {
-                    break;
-                }
-                let sub_idx = ((row * w + col) * 4) as usize;
-                let canvas_idx = ((canvas_y * self.width + canvas_x) * 4) as usize;
-                let src = &rgba_sub[sub_idx..sub_idx + 4];
+        // Visible row/col span after clamping to the canvas.
+        let copy_h = h.min(canvas_h.saturating_sub(y));
+        let copy_w = w.min(canvas_w.saturating_sub(x));
+        if copy_h == 0 || copy_w == 0 {
+            return;
+        }
 
-                match fc.blend_op {
-                    BlendOp::Source => {
-                        self.canvas[canvas_idx..canvas_idx + 4].copy_from_slice(src);
-                    }
-                    BlendOp::Over => {
-                        let (sr, sg, sb, sa) = (src[0], src[1], src[2], src[3]);
-                        if sa == 255 {
-                            self.canvas[canvas_idx..canvas_idx + 4].copy_from_slice(src);
-                        } else if sa != 0 {
-                            let dst = &mut self.canvas[canvas_idx..canvas_idx + 4];
-                            let (dr, dg, db, da) = (dst[0], dst[1], dst[2], dst[3]);
-                            let sa_u = u16::from(sa);
-                            let inv = 255 - sa_u;
-                            dst[0] = ((u16::from(sr) * sa_u + u16::from(dr) * inv) / 255) as u8;
-                            dst[1] = ((u16::from(sg) * sa_u + u16::from(dg) * inv) / 255) as u8;
-                            dst[2] = ((u16::from(sb) * sa_u + u16::from(db) * inv) / 255) as u8;
-                            dst[3] = ((sa_u * 255 + u16::from(da) * inv) / 255) as u8;
-                        }
-                    }
+        let row_bytes = (copy_w * 4) as usize;
+        let sub_stride = (w * 4) as usize;
+        let canvas_stride = (canvas_w * 4) as usize;
+
+        for row in 0..copy_h {
+            let sub_off = (row * w * 4) as usize;
+            let sub_row = &rgba_sub[sub_off..sub_off + row_bytes];
+            let canvas_off = (((y + row) * canvas_w + x) * 4) as usize;
+            let canvas_row = &mut self.canvas[canvas_off..canvas_off + row_bytes];
+
+            match fc.blend_op {
+                BlendOp::Source => {
+                    canvas_row.copy_from_slice(sub_row);
                 }
+                BlendOp::Over => composite_row_over(canvas_row, sub_row),
             }
+
+            // Stride guards against accidental over-read in debug builds.
+            debug_assert!(sub_off + sub_stride <= rgba_sub.len() || copy_w == w);
+            debug_assert!(canvas_off + canvas_stride <= self.canvas.len() || copy_w == canvas_w);
         }
     }
 
@@ -166,14 +162,25 @@ impl ApngDecoder {
                 "apng: unsupported bit depth {bit_depth:?}"
             )));
         }
-        let rgba_sub = to_rgba8(&self.sub_buf[..info.buffer_size()], color)?;
+        let n_pixels = (frame_control.width as usize) * (frame_control.height as usize);
+        expand_to_rgba8(
+            &self.sub_buf[..info.buffer_size()],
+            color,
+            n_pixels,
+            &mut self.rgba_sub,
+        )?;
 
         // Save "before" state for PREVIOUS disposal.
         if matches!(frame_control.dispose_op, DisposeOp::Previous) {
             self.previous_canvas.copy_from_slice(&self.canvas);
         }
 
+        // Borrow rgba_sub immutably for composite. We re-borrow self.canvas
+        // mutably inside composite_frame — split-borrow via a local would
+        // help, but we route through composite_frame for clarity.
+        let rgba_sub = std::mem::take(&mut self.rgba_sub);
         self.composite_frame(frame_control, &rgba_sub);
+        self.rgba_sub = rgba_sub; // hand the buffer back
 
         let delay_ms = {
             let num = f32::from(frame_control.delay_num);
@@ -190,8 +197,10 @@ impl ApngDecoder {
             }
         };
 
+        // Canvas is needed by the next frame's disposal/composite, so copy
+        // (don't move) it out.
         let frame = AnimatedFrame {
-            rgba: Bytes::copy_from_slice(&self.canvas),
+            rgba: self.canvas.clone(),
             width: self.width,
             height: self.height,
             delay_ms,
@@ -206,37 +215,74 @@ impl ApngDecoder {
     }
 }
 
-/// Expand an arbitrary PNG sub-frame buffer to RGBA8. APNG sub-frames can be
-/// any of the PNG color types; the `png` crate decodes them in their native
-/// form.
-fn to_rgba8(buf: &[u8], color: ColorType) -> Result<Vec<u8>, ImageError> {
+/// Alpha-blend `src` (RGBA) over `dst` (RGBA), per pixel. Hot inner loop for
+/// `BlendOp::Over` — short-circuits the common α=255 (full overwrite) case.
+fn composite_row_over(dst: &mut [u8], src: &[u8]) {
+    debug_assert_eq!(dst.len(), src.len());
+    debug_assert!(dst.len().is_multiple_of(4));
+    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        let sa = s[3];
+        if sa == 255 {
+            d.copy_from_slice(s);
+            continue;
+        }
+        if sa == 0 {
+            continue;
+        }
+        let sa_u = u16::from(sa);
+        let inv = 255 - sa_u;
+        d[0] = ((u16::from(s[0]) * sa_u + u16::from(d[0]) * inv) / 255) as u8;
+        d[1] = ((u16::from(s[1]) * sa_u + u16::from(d[1]) * inv) / 255) as u8;
+        d[2] = ((u16::from(s[2]) * sa_u + u16::from(d[2]) * inv) / 255) as u8;
+        d[3] = ((sa_u * 255 + u16::from(d[3]) * inv) / 255) as u8;
+    }
+}
+
+/// Expand an arbitrary PNG sub-frame buffer to RGBA8 into `out`. APNG
+/// sub-frames can be any of the PNG color types; the `png` crate decodes them
+/// in their native form. `out` is resized to `n_pixels * 4` bytes.
+fn expand_to_rgba8(
+    buf: &[u8],
+    color: ColorType,
+    n_pixels: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), ImageError> {
+    out.resize(n_pixels * 4, 0);
     match color {
-        ColorType::Rgba => Ok(buf.to_vec()),
+        ColorType::Rgba => {
+            out.copy_from_slice(&buf[..n_pixels * 4]);
+        }
         ColorType::Rgb => {
-            let mut out = Vec::with_capacity(buf.len() / 3 * 4);
-            for chunk in buf.chunks_exact(3) {
-                out.extend_from_slice(chunk);
-                out.push(255);
+            for (src, dst) in buf.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = 255;
             }
-            Ok(out)
         }
         ColorType::GrayscaleAlpha => {
-            let mut out = Vec::with_capacity(buf.len() * 2);
-            for chunk in buf.chunks_exact(2) {
-                let (g, a) = (chunk[0], chunk[1]);
-                out.extend_from_slice(&[g, g, g, a]);
+            for (src, dst) in buf.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
+                let (g, a) = (src[0], src[1]);
+                dst[0] = g;
+                dst[1] = g;
+                dst[2] = g;
+                dst[3] = a;
             }
-            Ok(out)
         }
         ColorType::Grayscale => {
-            let mut out = Vec::with_capacity(buf.len() * 4);
-            for &g in buf {
-                out.extend_from_slice(&[g, g, g, 255]);
+            for (src, dst) in buf.iter().zip(out.chunks_exact_mut(4)) {
+                let g = *src;
+                dst[0] = g;
+                dst[1] = g;
+                dst[2] = g;
+                dst[3] = 255;
             }
-            Ok(out)
         }
-        ColorType::Indexed => Err(ImageError::Decode(
-            "apng: indexed color not supported (png crate should expand)".into(),
-        )),
+        ColorType::Indexed => {
+            return Err(ImageError::Decode(
+                "apng: indexed color not supported (png crate should expand)".into(),
+            ));
+        }
     }
+    Ok(())
 }

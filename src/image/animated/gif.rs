@@ -53,10 +53,11 @@ impl GifDecoder {
         let (w, h) = (pixels.width() as u32, pixels.height() as u32);
 
         // `pixels_rgba()` returns `ImgVec<RGBA8>`; flatten to `&[u8]` via
-        // bytemuck since `RGBA8` is `#[repr(C)]` Pod.
+        // bytemuck since `RGBA8` is `#[repr(C)]` Pod. `Screen` owns its
+        // canvas — we have to copy to hand the caller an owned buffer.
         let rgba_bytes: &[u8] = bytemuck::cast_slice(pixels.buf());
         Ok(Some(AnimatedFrame {
-            rgba: bytes::Bytes::copy_from_slice(rgba_bytes),
+            rgba: rgba_bytes.to_vec(),
             width: w,
             height: h,
             delay_ms,

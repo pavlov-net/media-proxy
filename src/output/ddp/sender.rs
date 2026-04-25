@@ -3,9 +3,11 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::BytesMut;
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio::time;
@@ -13,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::OutputError;
-use crate::output::ddp::packet::{DDP_MAX_DATA, iter_packets};
+use crate::output::ddp::packet::{DDP_HEADER_LEN, DDP_MAX_DATA, PacketEncoder};
 use crate::output::ddp::pixel;
 use crate::output::ddp::spreading::{self, SpreadConfig};
 use crate::output::metrics::RateMeter;
@@ -30,7 +32,11 @@ pub struct DdpSender {
     spread: SpreadCfg,
     pace_hz: u32,
     metrics: Option<Mutex<Metrics>>,
-    seq: Mutex<u8>,
+    seq: AtomicU8,
+    /// Reusable per-packet buffer: header + max chunk. Held under a mutex
+    /// because `OutputSink::send_frame` takes `&self`, but in practice only
+    /// one task touches it.
+    pkt_buf: Mutex<BytesMut>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,13 +121,28 @@ impl DdpSender {
             spread,
             pace_hz,
             metrics,
-            seq: Mutex::new(1),
+            seq: AtomicU8::new(1),
+            pkt_buf: Mutex::new(BytesMut::with_capacity(DDP_HEADER_LEN + DDP_MAX_DATA)),
         })
     }
 
     async fn send_packet(&self, pkt: &[u8]) -> Result<(), OutputError> {
         self.socket.send_to(pkt, self.dest).await?;
         Ok(())
+    }
+
+    /// Take ownership of the reusable per-packet buffer for the duration of
+    /// one frame emit. The caller hands it back via `return_pkt_buf` so the
+    /// allocation is reused on the next frame.
+    fn take_pkt_buf(&self) -> BytesMut {
+        std::mem::replace(
+            &mut *self.pkt_buf.lock(),
+            BytesMut::with_capacity(DDP_HEADER_LEN + DDP_MAX_DATA),
+        )
+    }
+
+    fn return_pkt_buf(&self, buf: BytesMut) {
+        *self.pkt_buf.lock() = buf;
     }
 
     /// Compute the spreading plan for a frame whose pacing wants
@@ -216,24 +237,25 @@ impl OutputSink for DdpSender {
 
         let spread_plan = self.plan_spread(frame.meta.delay_ms, payload.len());
 
-        let start_seq = *self.seq.lock();
-        let mut last_next = start_seq;
+        let start_seq = self.seq.load(Ordering::Relaxed);
         let mut unique_packets: u32 = 0;
         let mut physical_packets: u32 = 0;
         let start = Instant::now();
         let mut slot = 0u32;
         let mut group_left = spread_plan.as_ref().map(|p| p.group_n).unwrap_or(1);
 
-        for (pkt, next) in iter_packets(&payload, self.output_id, start_seq, self.pixel_format) {
+        let mut pkt_buf = self.take_pkt_buf();
+        let mut encoder = PacketEncoder::new(&payload, self.output_id, start_seq, self.pixel_format);
+        while let Some(len) = encoder.encode_next(&mut pkt_buf) {
             for _ in 0..redundancy {
-                if let Err(e) = self.send_packet(&pkt).await {
+                if let Err(e) = self.send_packet(&pkt_buf[..len]).await {
                     warn!(?e, "DDP send failed");
+                    self.return_pkt_buf(pkt_buf);
                     return Err(e);
                 }
                 physical_packets = physical_packets.saturating_add(1);
             }
             unique_packets = unique_packets.saturating_add(1);
-            last_next = next;
 
             // Apply spreading between unique-packet groups, not between
             // redundant copies — matches the Python spec for still-frame
@@ -253,7 +275,8 @@ impl OutputSink for DdpSender {
                 }
             }
         }
-        *self.seq.lock() = last_next;
+        self.seq.store(encoder.current_seq(), Ordering::Relaxed);
+        self.return_pkt_buf(pkt_buf);
         self.record_frame(
             Instant::now(),
             unique_packets,

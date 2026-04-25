@@ -64,14 +64,26 @@ impl RateMeter {
         if self.ts.len() < 3 {
             return 0.0;
         }
-        let diffs: Vec<f64> = self
-            .ts
-            .iter()
-            .zip(self.ts.iter().skip(1))
-            .map(|((a, _), (b, _))| b.duration_since(*a).as_secs_f64())
-            .collect();
-        let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
-        let var = diffs.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (diffs.len() - 1) as f64;
+        // Welford's online variance — single pass, no Vec alloc.
+        let mut n: u64 = 0;
+        let mut mean = 0.0f64;
+        let mut m2 = 0.0f64;
+        let mut iter = self.ts.iter();
+        let Some(&(mut prev_t, _)) = iter.next() else {
+            return 0.0;
+        };
+        for &(t, _) in iter {
+            let d = t.duration_since(prev_t).as_secs_f64();
+            n += 1;
+            let delta = d - mean;
+            mean += delta / n as f64;
+            m2 += delta * (d - mean);
+            prev_t = t;
+        }
+        if n < 2 {
+            return 0.0;
+        }
+        let var = m2 / (n - 1) as f64;
         var.sqrt() * 1000.0
     }
 }

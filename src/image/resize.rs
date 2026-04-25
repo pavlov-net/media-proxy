@@ -127,27 +127,9 @@ pub fn resize_rgba(
     Ok(dst_image.into_vec())
 }
 
-/// Resize a single u8 grayscale plane.
-pub fn resize_u8(
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-    method: ResampleMethod,
-) -> Result<Vec<u8>, ImageError> {
-    let src_image =
-        ImageRef::new(src_w, src_h, src, PixelType::U8).map_err(|e| ImageError::Resize(e.to_string()))?;
-    let mut dst_image = Image::new(dst_w, dst_h, PixelType::U8);
-    let alg = alg_for(method, src_w, src_h, dst_w, dst_h);
-    Resizer::new()
-        .resize(&src_image, &mut dst_image, &ResizeOptions::new().resize_alg(alg))
-        .map_err(|e| ImageError::Resize(e.to_string()))?;
-    Ok(dst_image.into_vec())
-}
-
-/// Resize a single u16 grayscale plane (used by the gamma-aware path).
-pub fn resize_u16(
+/// Resize a 4-channel u16-per-channel image. Used by the gamma-aware path —
+/// one resize call instead of four single-channel passes.
+pub fn resize_u16x4(
     src: &[u16],
     src_w: u32,
     src_h: u32,
@@ -156,31 +138,15 @@ pub fn resize_u16(
     method: ResampleMethod,
 ) -> Result<Vec<u16>, ImageError> {
     let bytes: &[u8] = bytemuck::cast_slice(src);
-    let src_image =
-        ImageRef::new(src_w, src_h, bytes, PixelType::U16).map_err(|e| ImageError::Resize(e.to_string()))?;
-    let mut dst_image = Image::new(dst_w, dst_h, PixelType::U16);
+    let src_image = ImageRef::new(src_w, src_h, bytes, PixelType::U16x4)
+        .map_err(|e| ImageError::Resize(e.to_string()))?;
+    let mut dst_image = Image::new(dst_w, dst_h, PixelType::U16x4);
     let alg = alg_for(method, src_w, src_h, dst_w, dst_h);
     Resizer::new()
         .resize(&src_image, &mut dst_image, &ResizeOptions::new().resize_alg(alg))
         .map_err(|e| ImageError::Resize(e.to_string()))?;
     let raw = dst_image.into_vec();
-    let out: Vec<u16> = bytemuck::cast_slice(&raw).to_vec();
-    Ok(out)
-}
-
-/// Blend an RGBA pixel against a black background → RGB888.
-#[inline]
-fn blend_over_black(rgba: &[u8]) -> [u8; 3] {
-    let (r, g, b, a) = (rgba[0], rgba[1], rgba[2], rgba[3]);
-    if a == 255 {
-        return [r, g, b];
-    }
-    let af = u16::from(a);
-    [
-        ((u16::from(r) * af + 127) / 255) as u8,
-        ((u16::from(g) * af + 127) / 255) as u8,
-        ((u16::from(b) * af + 127) / 255) as u8,
-    ]
+    Ok(bytemuck::cast_slice(&raw).to_vec())
 }
 
 /// Placement plan for compositing an RGBA source onto a black RGB888 canvas.
@@ -196,6 +162,10 @@ pub struct CompositePlan {
 /// top-left corner in the source (positive for center-crop / `Cover`);
 /// `dst_off` picks where in the target canvas the region lands (positive for
 /// letterbox / `Pad`).
+///
+/// Walks row-by-row to avoid per-pixel index math, with a fast path when the
+/// inner rect already fills the target (no letterbox margins, no center-crop
+/// offsets) — the common case after a `compute_fit_size` resize.
 pub fn composite_rgba_to_rgb888(rgba: &[u8], plan: &CompositePlan) -> Vec<u8> {
     let (target_w, target_h) = plan.target;
     let (copy_w, copy_h) = plan.copy;
@@ -203,15 +173,42 @@ pub fn composite_rgba_to_rgb888(rgba: &[u8], plan: &CompositePlan) -> Vec<u8> {
     let (dst_off_x, dst_off_y) = plan.dst_off;
 
     let mut out = vec![0u8; (target_w * target_h * 3) as usize];
+    let src_stride = (plan.src_w as usize) * 4;
+    let dst_stride = (target_w as usize) * 3;
+    let copy_w_us = copy_w as usize;
+
     for y in 0..copy_h {
-        for x in 0..copy_w {
-            let si = (((y + src_off_y) * plan.src_w) + (x + src_off_x)) as usize * 4;
-            let pixel = blend_over_black(&rgba[si..si + 4]);
-            let oi = (((y + dst_off_y) * target_w) + (x + dst_off_x)) as usize * 3;
-            out[oi..oi + 3].copy_from_slice(&pixel);
-        }
+        let src_row_start = ((y + src_off_y) as usize) * src_stride + (src_off_x as usize) * 4;
+        let dst_row_start = ((y + dst_off_y) as usize) * dst_stride + (dst_off_x as usize) * 3;
+        let src_row = &rgba[src_row_start..src_row_start + copy_w_us * 4];
+        let dst_row = &mut out[dst_row_start..dst_row_start + copy_w_us * 3];
+        composite_row_over_black(src_row, dst_row);
     }
     out
+}
+
+/// Walk one row of RGBA → RGB888, blending each pixel against a black
+/// background. Hot path for opaque sources is a 3-byte copy per pixel.
+fn composite_row_over_black(src: &[u8], dst: &mut [u8]) {
+    debug_assert_eq!(src.len() % 4, 0);
+    debug_assert_eq!(dst.len(), src.len() / 4 * 3);
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+        let a = s[3];
+        if a == 255 {
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        } else if a == 0 {
+            d[0] = 0;
+            d[1] = 0;
+            d[2] = 0;
+        } else {
+            let af = u16::from(a);
+            d[0] = ((u16::from(s[0]) * af + 127) / 255) as u8;
+            d[1] = ((u16::from(s[1]) * af + 127) / 255) as u8;
+            d[2] = ((u16::from(s[2]) * af + 127) / 255) as u8;
+        }
+    }
 }
 
 /// Letterbox a smaller RGBA image onto a `target_w × target_h` black canvas.

@@ -8,19 +8,19 @@
 //! composited RGBA + per-frame duration — that the dispatcher runs through
 //! the still-image pipeline and caches as RGB888.
 
-use bytes::Bytes;
-
 pub mod apng;
 pub mod cache;
 pub mod dispatch;
 pub mod gif;
 pub mod webp;
 
-/// One fully-composited animation frame.
+/// One fully-composited animation frame. The buffer is owned (as `Vec<u8>`,
+/// not `Bytes`) so the dispatcher can hand it directly to the still-image
+/// pipeline without an extra copy.
 #[derive(Debug, Clone)]
 pub struct AnimatedFrame {
     /// RGBA canvas at the animation's natural size.
-    pub rgba: Bytes,
+    pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
     /// Display duration for this frame.

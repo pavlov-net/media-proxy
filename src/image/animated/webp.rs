@@ -3,7 +3,6 @@
 //! `WebPDecoder::read_frame` returns the already-composited canvas per frame,
 //! honoring disposal + blend from the VP8X/ANIM chunks.
 
-use bytes::Bytes;
 use image_webp::{DecodingError, WebPDecoder};
 
 use super::{AnimatedFrame, DEFAULT_DELAY_MS, MIN_DELAY_MS};
@@ -58,7 +57,7 @@ impl WebpDecoder {
                 self.decoder.read_image(&mut self.buf).map_err(webp_err)?;
                 self.frames_read = 1;
                 return Ok(Some(AnimatedFrame {
-                    rgba: Bytes::copy_from_slice(&self.buf),
+                    rgba: self.take_buf(),
                     width: self.width,
                     height: self.height,
                     delay_ms: DEFAULT_DELAY_MS,
@@ -83,11 +82,19 @@ impl WebpDecoder {
 
         self.frames_read += 1;
         Ok(Some(AnimatedFrame {
-            rgba: Bytes::copy_from_slice(&self.buf),
+            rgba: self.take_buf(),
             width: self.width,
             height: self.height,
             delay_ms,
         }))
+    }
+
+    /// Hand the current canvas buffer to the caller and replace it with a
+    /// fresh allocation. `read_frame` / `read_image` fully overwrite the
+    /// buffer on the next call, so we don't need to preserve its contents.
+    fn take_buf(&mut self) -> Vec<u8> {
+        let cap = self.buf.len();
+        std::mem::replace(&mut self.buf, vec![0u8; cap])
     }
 }
 

@@ -73,9 +73,15 @@ impl ImagePipeline {
     }
 }
 
-/// Gamma-aware resize: sRGB u8 → linear u16 per channel, resize each RGB
-/// channel in linear light (alpha stays in sRGB space as a mask), linear u16
-/// → sRGB u8. Approximates Pillow's `gamma_correct` path.
+/// Gamma-aware resize: pack the RGBA source as a single U16x4 image with R/G/B
+/// in linear light and alpha widened (`a * 257`), resize once via
+/// `fast_image_resize`, then narrow back to RGB888 + sRGB alpha.
+///
+/// Single-pass resize replaces the previous four separate single-channel
+/// resizes (3× u16 + 1× u8). Alpha rounds slightly differently — the u16
+/// widen/narrow round-trips through the resize at one extra bit of precision,
+/// so the output may differ by ±1 in alpha. R/G/B remain bit-identical for
+/// the convolution given the same algorithm.
 fn resize_rgba_gamma_aware(
     src: &[u8],
     src_w: u32,
@@ -84,34 +90,28 @@ fn resize_rgba_gamma_aware(
     dst_h: u32,
     method: ResampleMethod,
 ) -> Result<Vec<u8>, ImageError> {
-    // Split the RGBA source into four grayscale planes. We resize RGB in
-    // linear light and alpha in sRGB space (matching PIL's behavior — alpha
-    // isn't a color channel).
     let n = (src_w * src_h) as usize;
-    let mut r_lin = vec![0u16; n];
-    let mut g_lin = vec![0u16; n];
-    let mut b_lin = vec![0u16; n];
-    let mut a_src = vec![0u8; n];
+    let mut src_u16 = vec![0u16; n * 4];
     for i in 0..n {
         let px = &src[i * 4..i * 4 + 4];
-        r_lin[i] = gamma::SRGB_TO_LINEAR_U16[px[0] as usize];
-        g_lin[i] = gamma::SRGB_TO_LINEAR_U16[px[1] as usize];
-        b_lin[i] = gamma::SRGB_TO_LINEAR_U16[px[2] as usize];
-        a_src[i] = px[3];
+        let q = &mut src_u16[i * 4..i * 4 + 4];
+        q[0] = gamma::SRGB_TO_LINEAR_U16[px[0] as usize];
+        q[1] = gamma::SRGB_TO_LINEAR_U16[px[1] as usize];
+        q[2] = gamma::SRGB_TO_LINEAR_U16[px[2] as usize];
+        q[3] = u16::from(px[3]) * 257; // [0..255] → [0..65535]
     }
 
-    let r_resized = resize::resize_u16(&r_lin, src_w, src_h, dst_w, dst_h, method)?;
-    let g_resized = resize::resize_u16(&g_lin, src_w, src_h, dst_w, dst_h, method)?;
-    let b_resized = resize::resize_u16(&b_lin, src_w, src_h, dst_w, dst_h, method)?;
-    let a_resized = resize::resize_u8(&a_src, src_w, src_h, dst_w, dst_h, method)?;
+    let dst_u16 = resize::resize_u16x4(&src_u16, src_w, src_h, dst_w, dst_h, method)?;
 
     let dst_n = (dst_w * dst_h) as usize;
     let mut out = vec![0u8; dst_n * 4];
     for i in 0..dst_n {
-        out[i * 4] = gamma::LINEAR_TO_SRGB_U8[r_resized[i] as usize];
-        out[i * 4 + 1] = gamma::LINEAR_TO_SRGB_U8[g_resized[i] as usize];
-        out[i * 4 + 2] = gamma::LINEAR_TO_SRGB_U8[b_resized[i] as usize];
-        out[i * 4 + 3] = a_resized[i];
+        let p = &dst_u16[i * 4..i * 4 + 4];
+        out[i * 4] = gamma::LINEAR_TO_SRGB_U8[p[0] as usize];
+        out[i * 4 + 1] = gamma::LINEAR_TO_SRGB_U8[p[1] as usize];
+        out[i * 4 + 2] = gamma::LINEAR_TO_SRGB_U8[p[2] as usize];
+        // narrow u16 → u8: `(v + 128) / 257` is the exact inverse of `*257`.
+        out[i * 4 + 3] = ((u32::from(p[3]) + 128) / 257) as u8;
     }
     Ok(out)
 }

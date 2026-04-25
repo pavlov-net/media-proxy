@@ -10,7 +10,7 @@
 //! offset 8: length   u16  payload bytes in this packet
 //! ```
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 use crate::output::sink::PixelFormat;
 
@@ -61,46 +61,64 @@ pub fn next_sequence(current: u8) -> u8 {
     (current % 15) + 1
 }
 
-/// Iterator producing one DDP packet per chunk of payload.
-/// Yields `(packet_bytes, next_seq)` pairs — caller stores `next_seq` for the
-/// next call.
-pub fn iter_packets<'a>(
+/// Stateful packet encoder. Writes each packet into a caller-owned buffer so
+/// the sender can reuse a single allocation across all packets of a frame
+/// (and across frames).
+pub struct PacketEncoder<'a> {
     payload: &'a [u8],
     output_id: u8,
-    starting_seq: u8,
-    format: PixelFormat,
-) -> impl Iterator<Item = (Bytes, u8)> + 'a {
-    let cfg = pixel_cfg_for(format);
-    let total = payload.len();
-    let mut seq = starting_seq;
-    let mut offset: usize = 0;
+    cfg: u8,
+    seq: u8,
+    offset: usize,
+}
 
-    std::iter::from_fn(move || {
-        if offset >= total {
+impl<'a> PacketEncoder<'a> {
+    pub fn new(payload: &'a [u8], output_id: u8, starting_seq: u8, format: PixelFormat) -> Self {
+        Self {
+            payload,
+            output_id,
+            cfg: pixel_cfg_for(format),
+            seq: starting_seq,
+            offset: 0,
+        }
+    }
+
+    /// Sequence value the next emitted packet would carry. After the last
+    /// packet has been emitted, this is the sequence the *next* frame should
+    /// start with.
+    pub fn current_seq(&self) -> u8 {
+        self.seq
+    }
+
+    /// Write the next packet into `buf` (cleared first). Returns `Some(len)`
+    /// where `len` is the bytes written to `buf`, or `None` when the payload
+    /// has been fully drained. `buf` must have capacity
+    /// `DDP_HEADER_LEN + DDP_MAX_DATA`.
+    pub fn encode_next(&mut self, buf: &mut BytesMut) -> Option<usize> {
+        if self.offset >= self.payload.len() {
             return None;
         }
-        let end = (offset + DDP_MAX_DATA).min(total);
-        let chunk = &payload[offset..end];
-        let is_last = end >= total;
+        let end = (self.offset + DDP_MAX_DATA).min(self.payload.len());
+        let chunk = &self.payload[self.offset..end];
+        let is_last = end >= self.payload.len();
         let flags = DDP_FLAG_VER1 | if is_last { DDP_FLAG_PUSH } else { 0 };
 
-        let mut buf = BytesMut::with_capacity(DDP_HEADER_LEN + chunk.len());
+        buf.clear();
         DdpHeader {
             flags,
-            seq,
-            cfg,
-            out_id: output_id,
-            offset: offset as u32,
+            seq: self.seq,
+            cfg: self.cfg,
+            out_id: self.output_id,
+            offset: self.offset as u32,
             length: chunk.len() as u16,
         }
-        .encode_into(&mut buf);
+        .encode_into(buf);
         buf.extend_from_slice(chunk);
 
-        let next = next_sequence(seq);
-        seq = next;
-        offset = end;
-        Some((buf.freeze(), next))
-    })
+        self.seq = next_sequence(self.seq);
+        self.offset = end;
+        Some(buf.len())
+    }
 }
 
 #[cfg(test)]
@@ -144,28 +162,40 @@ mod tests {
         assert_eq!(&buf[8..10], &100u16.to_be_bytes());
     }
 
+    fn collect_packets(payload: &[u8], starting_seq: u8) -> Vec<Vec<u8>> {
+        let mut enc = PacketEncoder::new(payload, 1, starting_seq, PixelFormat::Rgb888);
+        let mut buf = BytesMut::with_capacity(DDP_HEADER_LEN + DDP_MAX_DATA);
+        let mut out = Vec::new();
+        while let Some(len) = enc.encode_next(&mut buf) {
+            out.push(buf[..len].to_vec());
+        }
+        out
+    }
+
     #[test]
     fn single_packet_has_push_flag() {
         let payload = vec![0u8; 100];
-        let packets: Vec<_> = iter_packets(&payload, 1, 1, PixelFormat::Rgb888).collect();
+        let packets = collect_packets(&payload, 1);
         assert_eq!(packets.len(), 1);
-        assert_eq!(packets[0].0[0] & DDP_FLAG_PUSH, DDP_FLAG_PUSH);
+        assert_eq!(packets[0][0] & DDP_FLAG_PUSH, DDP_FLAG_PUSH);
     }
 
     #[test]
     fn multi_packet_only_last_has_push() {
         // 1441 bytes → 2 packets (1440 + 1)
         let payload = vec![0u8; DDP_MAX_DATA + 1];
-        let packets: Vec<_> = iter_packets(&payload, 1, 1, PixelFormat::Rgb888).collect();
+        let packets = collect_packets(&payload, 1);
         assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].0[0] & DDP_FLAG_PUSH, 0);
-        assert_eq!(packets[1].0[0] & DDP_FLAG_PUSH, DDP_FLAG_PUSH);
+        assert_eq!(packets[0][0] & DDP_FLAG_PUSH, 0);
+        assert_eq!(packets[1][0] & DDP_FLAG_PUSH, DDP_FLAG_PUSH);
     }
 
     #[test]
     fn returned_next_seq_matches_wrap() {
         let payload = vec![0u8; 100];
-        let (_pkt, next) = iter_packets(&payload, 1, 15, PixelFormat::Rgb888).next().unwrap();
-        assert_eq!(next, 1);
+        let mut enc = PacketEncoder::new(&payload, 1, 15, PixelFormat::Rgb888);
+        let mut buf = BytesMut::with_capacity(DDP_HEADER_LEN + DDP_MAX_DATA);
+        let _ = enc.encode_next(&mut buf).unwrap();
+        assert_eq!(enc.current_seq(), 1);
     }
 }

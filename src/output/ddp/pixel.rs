@@ -20,33 +20,68 @@ pub fn endian_for(format: PixelFormat) -> Option<Endian> {
     }
 }
 
-/// Scalar RGB888 → RGB565 conversion.
+/// LUT giving `r5 << 11` for each input byte. Computed at compile time from
+/// the same `(c * 31 * 2 + 255) / 510` rounding the scalar code used.
+static LUT_R5_SHIFTED: [u16; 256] = build_r5_lut();
+static LUT_G6_SHIFTED: [u16; 256] = build_g6_lut();
+static LUT_B5: [u16; 256] = build_b5_lut();
+
+const fn build_r5_lut() -> [u16; 256] {
+    let mut lut = [0u16; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        lut[i as usize] = (((i * 31 * 2 + 255) / 510) as u16) << 11;
+        i += 1;
+    }
+    lut
+}
+
+const fn build_g6_lut() -> [u16; 256] {
+    let mut lut = [0u16; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        lut[i as usize] = (((i * 63 * 2 + 255) / 510) as u16) << 5;
+        i += 1;
+    }
+    lut
+}
+
+const fn build_b5_lut() -> [u16; 256] {
+    let mut lut = [0u16; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        lut[i as usize] = ((i * 31 * 2 + 255) / 510) as u16;
+        i += 1;
+    }
+    lut
+}
+
+/// RGB888 → RGB565. Input must be RGB-triplets (length multiple of 3). Any
+/// ragged tail is dropped. Returns `(len/3)*2` bytes in the chosen endianness.
 ///
-/// Input must be RGB-triplets (length multiple of 3). Any ragged tail is
-/// dropped. Returns a buffer of `(len/3)*2` bytes in the chosen endianness.
+/// Three 256-entry LUTs replace the per-pixel multiply/divide; the LUT path is
+/// bit-identical to the scalar `(c * N * 2 + 255) / 510` rounding the original
+/// implementation used.
 pub fn rgb888_to_565(input: &[u8], endian: Endian) -> Vec<u8> {
     let n = input.len() / 3;
     let mut out = vec![0u8; n * 2];
-    for i in 0..n {
-        let r = input[i * 3] as u32;
-        let g = input[i * 3 + 1] as u32;
-        let b = input[i * 3 + 2] as u32;
-
-        // (c / 255) * N + 0.5, truncated — integer-only form to keep
-        // bit-identical results with any SIMD path.
-        let r5 = ((r * 31 * 2 + 255) / (255 * 2)) & 0x1F;
-        let g6 = ((g * 63 * 2 + 255) / (255 * 2)) & 0x3F;
-        let b5 = ((b * 31 * 2 + 255) / (255 * 2)) & 0x1F;
-
-        let v: u16 = ((r5 as u16) << 11) | ((g6 as u16) << 5) | (b5 as u16);
-        let bytes = match endian {
-            Endian::Le => v.to_le_bytes(),
-            Endian::Be => v.to_be_bytes(),
-        };
-        out[i * 2] = bytes[0];
-        out[i * 2 + 1] = bytes[1];
+    match endian {
+        Endian::Le => convert_to(input, &mut out, |v| v.to_le_bytes()),
+        Endian::Be => convert_to(input, &mut out, |v| v.to_be_bytes()),
     }
     out
+}
+
+#[inline]
+fn convert_to(input: &[u8], out: &mut [u8], to_bytes: fn(u16) -> [u8; 2]) {
+    for (i_chunk, o_chunk) in input.chunks_exact(3).zip(out.chunks_exact_mut(2)) {
+        let v = LUT_R5_SHIFTED[i_chunk[0] as usize]
+            | LUT_G6_SHIFTED[i_chunk[1] as usize]
+            | LUT_B5[i_chunk[2] as usize];
+        let bytes = to_bytes(v);
+        o_chunk[0] = bytes[0];
+        o_chunk[1] = bytes[1];
+    }
 }
 
 /// Convert a frame to the requested pixel format.

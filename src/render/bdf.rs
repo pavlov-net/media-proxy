@@ -25,8 +25,10 @@ pub struct Glyph {
     /// Y-offset of bounding box from origin (baseline = 0, ascenders > 0).
     pub bbx_y: i16,
     /// One byte per row, MSB-first within each byte, padded to byte boundary.
-    /// Length = `bbx_h * bytes_per_row` where `bytes_per_row = ceil(bbx_w/8)`.
+    /// Length = `bbx_h * bytes_per_row`.
     pub bitmap: Vec<u8>,
+    /// `ceil(bbx_w / 8)`, cached from parse so `pixel()` doesn't recompute.
+    pub bytes_per_row: u16,
 }
 
 #[derive(Debug)]
@@ -157,6 +159,7 @@ fn parse_glyph<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Result<Option<G
         bbx_x,
         bbx_y,
         bitmap,
+        bytes_per_row: bytes_per_row as u16,
     }))
 }
 
@@ -175,8 +178,7 @@ impl Glyph {
         if col >= self.bbx_w || row >= self.bbx_h {
             return false;
         }
-        let bytes_per_row = (self.bbx_w as usize).div_ceil(8);
-        let byte_idx = (row as usize) * bytes_per_row + (col as usize) / 8;
+        let byte_idx = (row as usize) * (self.bytes_per_row as usize) + (col as usize) / 8;
         let bit = 7 - ((col as usize) % 8);
         self.bitmap.get(byte_idx).is_some_and(|b| (b >> bit) & 1 == 1)
     }

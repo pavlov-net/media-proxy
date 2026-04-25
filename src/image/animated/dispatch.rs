@@ -123,7 +123,7 @@ pub fn dispatch(
             )));
         }
         let decoded = DecodedImage {
-            rgba: rgba.to_vec(),
+            rgba,
             width,
             height,
             icc_profile: None,

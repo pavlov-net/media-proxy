@@ -9,7 +9,7 @@ pub mod spreading;
 
 pub use packet::{
     DDP_HEADER_LEN, DDP_MAX_DATA, DDP_PIXEL_CFG_RGB565_BE, DDP_PIXEL_CFG_RGB565_LE, DDP_PIXEL_CFG_RGB888,
-    DdpHeader, iter_packets, next_sequence,
+    DdpHeader, PacketEncoder, next_sequence,
 };
 pub use registry::{DdpKey, DdpRegistry, DdpReservation};
 pub use sender::DdpSender;
