@@ -130,9 +130,13 @@ async fn run_with_retry(
     resolver: &Arc<dyn Resolver>,
     sink: &dyn OutputSink,
 ) -> Result<(), StreamError> {
+    // Probe once per stream — Content-Type / magic bytes don't change for
+    // the lifetime of the source, so retries and loop iterations reuse the
+    // result instead of re-issuing HEAD requests.
+    let kind = crate::stream::probe::probe(&fields.source, &config.net.user_agent).await;
     let mut attempt: u32 = 0;
     loop {
-        let source = match build_source(fields, config, frame_cache, resolver).await {
+        let source = match build_source(fields, config, frame_cache, resolver, kind).await {
             Ok(s) => s,
             Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
                 let delay = backoff(attempt);
@@ -193,10 +197,14 @@ async fn build_source(
     config: &Config,
     frame_cache: &FrameCache,
     resolver: &Arc<dyn Resolver>,
+    kind: crate::stream::probe::MediaKind,
 ) -> Result<crate::stream::frame_source::FrameSource, StreamError> {
-    if crate::stream::url::classify(&fields.source).is_video() {
-        crate::video::dispatch::build_video_source(fields, config, resolver).await
-    } else {
-        crate::image::dispatch::build_image_source(fields, config, frame_cache).await
+    match kind {
+        crate::stream::probe::MediaKind::Video => {
+            crate::video::dispatch::build_video_source(fields, config, resolver).await
+        }
+        crate::stream::probe::MediaKind::Image => {
+            crate::image::dispatch::build_image_source(fields, config, frame_cache).await
+        }
     }
 }

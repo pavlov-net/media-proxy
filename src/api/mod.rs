@@ -7,6 +7,18 @@ pub mod state;
 
 pub use state::AppState;
 
+use axum::http::HeaderMap;
+
+/// Extract the `Host` header for use as `server_host` in source
+/// normalization. Falls back to `"localhost"` when missing or non-ASCII so
+/// `internal:` rewriting still produces a valid URL.
+pub fn host_header(headers: &HeaderMap) -> &str {
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost")
+}
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

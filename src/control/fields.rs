@@ -190,17 +190,8 @@ impl StreamFields {
                 "w/h must be ≤ {MAX_OUTPUT_DIM}"
             )));
         }
-        if req.src.trim().is_empty() {
-            return Err(ControlError::BadRequest("src must not be empty".into()));
-        }
-
-        // Normalize the source URL: percent-decode (so ffmpeg doesn't see
-        // double-encoded paths), then rewrite `internal:` URLs to hit our
-        // own REST surface via the server's own host.
-        let source = crate::stream::url::rewrite_internal(
-            &crate::stream::url::percent_decode(req.src.trim()),
-            server_host,
-        );
+        let source =
+            crate::stream::url::normalize_source(&req.src, server_host).map_err(ControlError::BadRequest)?;
 
         if req.out < 0 {
             return Err(ControlError::BadRequest("out must be ≥ 0".into()));
@@ -274,10 +265,14 @@ impl StreamFields {
 }
 
 /// Overlay `update` fields onto a prior stream's resolved state. Any field
-/// left `None` in the update keeps the prior value. Source/ddp_host strings
-/// go through the same normalization as the original `from_start` call
-/// already performed, so we don't re-percent-decode here.
-pub fn merge_update(prior: &StreamFields, upd: &UpdateStream) -> StreamFields {
+/// left `None` in the update keeps the prior value. The `src` field, if
+/// present, runs through the same [`normalize_source`] pipeline as the
+/// original `from_start`.
+pub fn merge_update(
+    prior: &StreamFields,
+    upd: &UpdateStream,
+    server_host: &str,
+) -> Result<StreamFields, ControlError> {
     let mut out = prior.clone();
     if let Some(v) = upd.w {
         out.width = v;
@@ -307,11 +302,8 @@ pub fn merge_update(prior: &StreamFields, upd: &UpdateStream) -> StreamFields {
         out.ema = v.clamp(0.0, 1.0);
     }
     if let Some(ref s) = upd.src {
-        // Passes through `percent_decode` + `rewrite_internal` would be nice
-        // here, but we don't have `server_host` in this context. Callers
-        // should have normalized at `from_start` time; the raw value from an
-        // update is preserved verbatim for backward compat.
-        out.source = s.clone();
+        out.source =
+            crate::stream::url::normalize_source(s, server_host).map_err(ControlError::BadRequest)?;
     }
     if let Some(ref s) = upd.fmt
         && let Some(fmt) = PixelFormat::from_str_canon(s)
@@ -323,5 +315,5 @@ pub fn merge_update(prior: &StreamFields, upd: &UpdateStream) -> StreamFields {
     {
         out.ddp_host = ip;
     }
-    out
+    Ok(out)
 }

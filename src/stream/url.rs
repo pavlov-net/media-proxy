@@ -1,11 +1,49 @@
 //! URL classification — shared by the stream orchestrator, resolver, and fetcher.
+//!
+//! Sources from the wire are normalized to URL strings at the entry-point
+//! boundaries via [`normalize_source`]; everything downstream assumes URL
+//! form (`http://`, `https://`, `file://`, `rtsp://`, …).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use url::Url;
 
 const IMAGE_EXT: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"];
 const VIDEO_EXT: &[&str] = &[
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".3gp", ".ts",
 ];
+
+/// Normalize a wire-level `src` into a URL string. Run at every entry-point
+/// boundary so downstream code can assume URL form.
+///
+/// Pipeline: trim → percent-decode → rewrite `internal:` → wrap bare paths
+/// in `file://`. Relative paths resolve against the server's cwd. Windows
+/// drive letters fall through to the path branch (`c:\foo` has `:` but
+/// not `://`).
+pub fn normalize_source(raw: &str, server_host: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("src must not be empty".into());
+    }
+    let decoded = percent_decode(trimmed);
+    let rewritten = rewrite_internal(&decoded, server_host);
+
+    if rewritten.contains("://") {
+        return Ok(rewritten);
+    }
+
+    let path = std::path::Path::new(&rewritten);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("cwd unavailable for relative path: {e}"))?
+            .join(path)
+    };
+    Url::from_file_path(&abs)
+        .map(|u| u.into())
+        .map_err(|()| format!("not a valid file path: {}", abs.display()))
+}
 
 /// Rewrite `internal:<path>[?query]` to `http://<server_host>/api/internal/<path>[?query]`.
 /// Returns the input unchanged if it's not an `internal:` URL.
@@ -30,37 +68,13 @@ pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-/// Decode percent-escapes in a source URL. Safe to apply before classification
-/// since classification only inspects scheme + extension.
+/// Decode percent-escapes in a source URL. Falls back to the original
+/// string if the decoded bytes aren't valid UTF-8.
 pub fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = hex_val(bytes[i + 1]);
-            let lo = hex_val(bytes[i + 2]);
-            if let (Some(h), Some(l)) = (hi, lo) {
-                out.push((h << 4) | l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    // Invalid UTF-8 after decoding shouldn't happen for well-formed URLs; fall
-    // back to the original string if it does.
-    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    percent_encoding::percent_decode_str(s)
+        .decode_utf8()
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| s.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,12 +93,8 @@ pub fn classify(url: &str) -> UrlKind {
     if let Some(path) = as_local_path(url) {
         return UrlKind::LocalPath(path);
     }
-    let lower = url.to_ascii_lowercase();
-    if IMAGE_EXT.iter().any(|ext| lower.ends_with(ext)) {
-        return UrlKind::DirectImage;
-    }
-    if VIDEO_EXT.iter().any(|ext| lower.ends_with(ext)) {
-        return UrlKind::DirectVideo;
+    if let Some(k) = classify_extension(url) {
+        return k;
     }
     for scheme in ["rtmp", "rtsp", "udp", "tcp"] {
         if url.starts_with(&format!("{scheme}://")) {
@@ -97,15 +107,31 @@ pub fn classify(url: &str) -> UrlKind {
     UrlKind::Unknown
 }
 
-/// Returns a local filesystem path for `file://…` URLs and scheme-less paths.
-pub fn as_local_path(url: &str) -> Option<PathBuf> {
-    if let Some(rest) = url.strip_prefix("file://") {
-        return Some(Path::new(rest).to_path_buf());
+/// Inspect the URL's extension (ignoring query/fragment) and return
+/// `DirectImage` / `DirectVideo` if recognized. Used by [`probe`] to
+/// classify `file://` URLs by extension when magic-byte detection fails,
+/// and as a fallback when HEAD doesn't return a useful Content-Type.
+pub fn classify_extension(url: &str) -> Option<UrlKind> {
+    // Strip query and fragment so `foo.png?token=…` still matches `.png`.
+    let path_part = url.split_once('?').map_or(url, |(p, _)| p);
+    let path_part = path_part.split_once('#').map_or(path_part, |(p, _)| p);
+    let lower = path_part.to_ascii_lowercase();
+    if IMAGE_EXT.iter().any(|ext| lower.ends_with(ext)) {
+        return Some(UrlKind::DirectImage);
     }
-    if !url.contains("://") {
-        return Some(Path::new(url).to_path_buf());
+    if VIDEO_EXT.iter().any(|ext| lower.ends_with(ext)) {
+        return Some(UrlKind::DirectVideo);
     }
     None
+}
+
+/// Returns a local filesystem path for `file://…` URLs. After
+/// [`normalize_source`] runs at every entry-point boundary, scheme-less
+/// paths shouldn't reach this function; only `file://` URLs need to be
+/// recognized. `Url::to_file_path` handles cross-platform decoding (drive
+/// letters on Windows, UNC shares, percent-decoding).
+pub fn as_local_path(url: &str) -> Option<PathBuf> {
+    Url::parse(url).ok().and_then(|u| u.to_file_path().ok())
 }
 
 impl UrlKind {
@@ -136,10 +162,49 @@ mod tests {
     }
 
     #[test]
-    fn local_path_without_scheme() {
-        let k = classify("/tmp/foo.png");
+    fn file_url_is_local_path() {
+        // After normalization, local paths reach `classify` as `file://`
+        // URLs; bare paths are no longer valid input here.
+        let k = classify("file:///tmp/foo.png");
         assert!(matches!(k, UrlKind::LocalPath(_)));
         assert!(k.is_direct_media());
+    }
+
+    #[test]
+    fn normalize_bare_path_to_file_url() {
+        let out = normalize_source("/tmp/foo.png", "h:80").unwrap();
+        assert_eq!(out, "file:///tmp/foo.png");
+    }
+
+    #[test]
+    fn normalize_passes_http_through() {
+        let out = normalize_source("https://example.com/x.png", "h:80").unwrap();
+        assert_eq!(out, "https://example.com/x.png");
+    }
+
+    #[test]
+    fn normalize_rewrites_internal() {
+        let out = normalize_source("internal:placeholder/64x64.png", "h:80").unwrap();
+        assert_eq!(out, "http://h:80/api/internal/placeholder/64x64.png");
+    }
+
+    #[test]
+    fn normalize_percent_decodes_path() {
+        let out = normalize_source("%2Ftmp%2Fmy%20file.png", "h:80").unwrap();
+        // `Url::from_file_path` re-encodes spaces in the URL form.
+        assert!(out.starts_with("file:///tmp/my"));
+        assert!(out.ends_with("file.png"));
+    }
+
+    #[test]
+    fn normalize_rejects_empty() {
+        assert!(normalize_source("   ", "h:80").is_err());
+    }
+
+    #[test]
+    fn normalize_preserves_streaming_protocol() {
+        let out = normalize_source("rtsp://cam/live", "h:80").unwrap();
+        assert_eq!(out, "rtsp://cam/live");
     }
 
     #[test]

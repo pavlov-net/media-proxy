@@ -5,10 +5,9 @@
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::Client;
-
 use crate::error::{ImageError, MediaError};
 use crate::image::decode::{MAX_SIZE_LIMIT, MEMORY_THRESHOLD};
+use crate::stream::http::CLIENT;
 use crate::stream::url::{UrlKind, classify};
 
 pub async fn fetch_bytes(src_url: &str, user_agent: &str) -> Result<Vec<u8>, ImageError> {
@@ -42,14 +41,10 @@ async fn read_local(path: &Path, src_url: &str) -> Result<Vec<u8>, ImageError> {
 async fn fetch_http(src_url: &str, user_agent: &str) -> Result<Vec<u8>, ImageError> {
     use futures::StreamExt;
 
-    let client = Client::builder()
-        .user_agent(user_agent)
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| network_err(src_url, e.to_string(), None))?;
-
-    let resp = client
+    let resp = CLIENT
         .get(src_url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| network_err(src_url, e.to_string(), e.status().map(|s| s.as_u16() as i32)))?;

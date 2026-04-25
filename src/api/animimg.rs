@@ -5,6 +5,8 @@ use std::io::Cursor;
 use std::io::Write;
 use std::sync::Arc;
 
+use crate::api::host_header;
+use crate::stream::url::normalize_source;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -44,7 +46,16 @@ fn default_fit() -> String {
     "cover".into()
 }
 
-pub async fn convert(State(state): State<Arc<AppState>>, Json(req): Json<AnimimgRequest>) -> Response {
+pub async fn convert(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(mut req): Json<AnimimgRequest>,
+) -> Response {
+    req.source = match normalize_source(&req.source, host_header(&headers)) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("source: {e}")).into_response(),
+    };
+
     let fit = match req.fit.as_str() {
         "pad" => Fit::Pad,
         "auto" => Fit::Auto,

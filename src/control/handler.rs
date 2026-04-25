@@ -122,7 +122,7 @@ impl Handler {
         };
 
         // Overlay update-supplied fields onto the prior stream's view.
-        let merged = crate::control::fields::merge_update(&prior_fields, &req);
+        let merged = crate::control::fields::merge_update(&prior_fields, &req, &session.server_host)?;
         self.start_with_fields(session, merged).await
     }
 

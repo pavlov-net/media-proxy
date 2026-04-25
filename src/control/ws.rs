@@ -39,11 +39,7 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string();
+    let host = crate::api::host_header(&headers).to_string();
     ws.on_upgrade(move |socket| handle_socket(socket, state, addr, host))
 }
 
