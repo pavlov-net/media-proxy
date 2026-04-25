@@ -6,8 +6,10 @@
 .vscode/
 .claude/
 
-# Local cargo config (per-host overrides like git-fetch-with-cli)
-.cargo/
+# Cargo registry credentials — never commit. Tracked .cargo/config.toml
+# carries project-wide build settings (target-cpu, linker preference).
+.cargo/credentials
+.cargo/credentials.toml
 
 # OS
 .DS_Store
