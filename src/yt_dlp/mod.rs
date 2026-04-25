@@ -28,10 +28,6 @@ use tracing::{debug, warn};
 pub struct YtDlp {
     bin: PathBuf,
     deno: Option<PathBuf>,
-    /// Captured at construction; passed to `--ca-certs` so yt-dlp respects
-    /// custom CA bundles in sandboxes / TLS-intercepting proxies. yt-dlp
-    /// otherwise uses bundled `certifi` and ignores `SSL_CERT_FILE`.
-    ca_bundle: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -65,10 +61,7 @@ impl YtDlp {
                 bin.display()
             );
         }
-        let ca_bundle = std::env::var_os("SSL_CERT_FILE")
-            .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty());
-        Some(Self { bin, deno, ca_bundle })
+        Some(Self { bin, deno })
     }
 
     pub fn bin(&self) -> &Path {
@@ -89,9 +82,6 @@ impl YtDlp {
 
         if let Some(deno) = &self.deno {
             cmd.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
-        }
-        if let Some(bundle) = &self.ca_bundle {
-            cmd.arg("--ca-certs").arg(bundle);
         }
 
         debug!(
@@ -128,7 +118,17 @@ impl YtDlp {
                 .lines()
                 .rfind(|l| l.starts_with("ERROR:"))
                 .map(str::to_string)
-                .unwrap_or_else(|| "yt-dlp exited non-zero".to_string());
+                .unwrap_or_else(|| {
+                    // No `ERROR:` line — surface whatever stderr we got so the
+                    // failure isn't opaque (argparse errors, deno crashes,
+                    // proxy/CA issues all land here).
+                    let trimmed = stderr.trim();
+                    if trimmed.is_empty() {
+                        "yt-dlp exited non-zero (no stderr)".to_string()
+                    } else {
+                        format!("yt-dlp exited non-zero: {trimmed}")
+                    }
+                });
             return Err(YtDlpError::Failed {
                 message,
                 exit_code: out.status.code(),
