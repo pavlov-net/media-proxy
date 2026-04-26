@@ -217,7 +217,7 @@ fn is_retryable(e: &StreamError) -> bool {
         StreamError::Media(m) => m.is_retryable(),
         StreamError::Video(crate::error::VideoError::Media(m)) => m.is_retryable(),
         StreamError::Image(crate::error::ImageError::Media(m)) => m.is_retryable(),
-        StreamError::Resolver(_) => true,
+        StreamError::Resolver(r) => r.is_retryable(),
         _ => false,
     }
 }

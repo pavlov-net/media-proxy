@@ -179,36 +179,13 @@ impl StreamFields {
         server_host: &str,
         defaults: &crate::Config,
     ) -> Result<Self, ControlError> {
-        if req.w == 0 || req.h == 0 {
-            return Err(ControlError::BadRequest("w/h must be > 0".into()));
-        }
-        // Cap output dimensions so a malicious/misconfigured client can't
-        // force giant per-frame allocations in the video or animated paths
-        // (frame bytes scale as w*h*channels).
-        if req.w > MAX_OUTPUT_DIM || req.h > MAX_OUTPUT_DIM {
-            return Err(ControlError::BadRequest(format!(
-                "w/h must be ≤ {MAX_OUTPUT_DIM}"
-            )));
-        }
+        // Parse-time errors that aren't representable in the struct
+        // (string→enum, string→IpAddr, source URL normalization) are
+        // surfaced eagerly here. Numeric range invariants are deferred to
+        // `validate` so `from_start` and `merge_update` enforce the same
+        // post-construction rules.
         let source =
             crate::stream::url::normalize_source(&req.src, server_host).map_err(ControlError::BadRequest)?;
-
-        if req.out < 0 {
-            return Err(ControlError::BadRequest("out must be ≥ 0".into()));
-        }
-        if matches!(req.ddp_port, Some(0)) {
-            return Err(ControlError::BadRequest("ddp_port must be > 0".into()));
-        }
-        if let Some(ema) = req.ema
-            && !(0.0..=1.0).contains(&ema)
-        {
-            return Err(ControlError::BadRequest("ema must be in [0.0, 1.0]".into()));
-        }
-
-        let expand = req.expand.unwrap_or(defaults.video.expand_mode);
-        if !(0..=2).contains(&expand) {
-            return Err(ControlError::BadRequest("expand must be 0, 1, or 2".into()));
-        }
 
         let fit = req.fit.unwrap_or(match defaults.video.fit.as_str() {
             "pad" => Fit::Pad,
@@ -220,15 +197,14 @@ impl StreamFields {
         let fmt = PixelFormat::from_str_canon(&fmt_str)
             .ok_or_else(|| ControlError::BadRequest(format!("unknown fmt: {fmt_str}")))?;
 
-        let ddp_host_str = req.ddp_host.clone();
-        let ddp_host: IpAddr = match ddp_host_str.as_deref() {
+        let ddp_host: IpAddr = match req.ddp_host.as_deref() {
             Some(s) => s
                 .parse()
                 .map_err(|e| ControlError::BadRequest(format!("ddp_host parse: {e}")))?,
             None => client_ip,
         };
 
-        Ok(Self {
+        let fields = Self {
             output_id: req.out,
             width: req.w,
             height: req.h,
@@ -236,13 +212,42 @@ impl StreamFields {
             ddp_port: req.ddp_port.unwrap_or(4048),
             ddp_host,
             r#loop: req.r#loop.unwrap_or(defaults.playback.r#loop),
-            expand,
+            expand: req.expand.unwrap_or(defaults.video.expand_mode),
             hw: req.hw.unwrap_or(HwPref::Auto),
             fit,
             fmt,
             pace: req.pace.unwrap_or(0),
-            ema: req.ema.unwrap_or(0.0).clamp(0.0, 1.0),
-        })
+            ema: req.ema.unwrap_or(0.0),
+        };
+        fields.validate()?;
+        Ok(fields)
+    }
+
+    /// Post-construction invariants for both start and update flows.
+    /// Width/height caps exist so a malicious or misconfigured client
+    /// can't force giant per-frame allocations (`w * h * channels`).
+    pub fn validate(&self) -> Result<(), ControlError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(ControlError::BadRequest("w/h must be > 0".into()));
+        }
+        if self.width > MAX_OUTPUT_DIM || self.height > MAX_OUTPUT_DIM {
+            return Err(ControlError::BadRequest(format!(
+                "w/h must be ≤ {MAX_OUTPUT_DIM}"
+            )));
+        }
+        if self.output_id < 0 {
+            return Err(ControlError::BadRequest("out must be ≥ 0".into()));
+        }
+        if self.ddp_port == 0 {
+            return Err(ControlError::BadRequest("ddp_port must be > 0".into()));
+        }
+        if !(0..=2).contains(&self.expand) {
+            return Err(ControlError::BadRequest("expand must be 0, 1, or 2".into()));
+        }
+        if !(0.0..=1.0).contains(&self.ema) {
+            return Err(ControlError::BadRequest("ema must be in [0.0, 1.0]".into()));
+        }
+        Ok(())
     }
 
     pub fn to_applied(&self) -> AppliedParams {
@@ -268,6 +273,12 @@ impl StreamFields {
 /// left `None` in the update keeps the prior value. The `src` field, if
 /// present, runs through the same [`normalize_source`] pipeline as the
 /// original `from_start`.
+///
+/// Invalid `fmt` and `ddp_host` values fail the request rather than being
+/// silently ignored — the previous behaviour let a client send `fmt: "junk"`
+/// and receive a successful ack while the field had no effect. After all
+/// fields land, the merged value runs through [`StreamFields::validate`]
+/// so update requests can't reach states that `start_stream` would reject.
 pub fn merge_update(
     prior: &StreamFields,
     upd: &UpdateStream,
@@ -299,21 +310,177 @@ pub fn merge_update(
         out.pace = v;
     }
     if let Some(v) = upd.ema {
-        out.ema = v.clamp(0.0, 1.0);
+        out.ema = v;
     }
     if let Some(ref s) = upd.src {
         out.source =
             crate::stream::url::normalize_source(s, server_host).map_err(ControlError::BadRequest)?;
     }
-    if let Some(ref s) = upd.fmt
-        && let Some(fmt) = PixelFormat::from_str_canon(s)
-    {
-        out.fmt = fmt;
+    if let Some(ref s) = upd.fmt {
+        out.fmt = PixelFormat::from_str_canon(s)
+            .ok_or_else(|| ControlError::BadRequest(format!("unknown fmt: {s}")))?;
     }
-    if let Some(ref s) = upd.ddp_host
-        && let Ok(ip) = s.parse::<IpAddr>()
-    {
-        out.ddp_host = ip;
+    if let Some(ref s) = upd.ddp_host {
+        out.ddp_host = s
+            .parse::<IpAddr>()
+            .map_err(|e| ControlError::BadRequest(format!("ddp_host parse: {e}")))?;
     }
+    out.validate()?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    fn good_fields() -> StreamFields {
+        StreamFields {
+            output_id: 0,
+            width: 64,
+            height: 32,
+            source: "file:///x".into(),
+            ddp_port: 4048,
+            ddp_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            r#loop: false,
+            expand: 0,
+            hw: HwPref::None,
+            fit: Fit::Pad,
+            fmt: PixelFormat::Rgb888,
+            pace: 0,
+            ema: 0.0,
+        }
+    }
+
+    fn upd_default() -> UpdateStream {
+        UpdateStream {
+            out: 0,
+            ddp_port: None,
+            ddp_host: None,
+            w: None,
+            h: None,
+            src: None,
+            r#loop: None,
+            expand: None,
+            hw: None,
+            fit: None,
+            fmt: None,
+            pace: None,
+            ema: None,
+        }
+    }
+
+    #[test]
+    fn validate_accepts_good_fields() {
+        good_fields().validate().expect("valid");
+    }
+
+    #[test]
+    fn validate_rejects_zero_dims() {
+        let mut f = good_fields();
+        f.width = 0;
+        assert!(f.validate().is_err());
+        let mut f = good_fields();
+        f.height = 0;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_dims() {
+        let mut f = good_fields();
+        f.width = MAX_OUTPUT_DIM + 1;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_ddp_port() {
+        let mut f = good_fields();
+        f.ddp_port = 0;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_negative_output_id() {
+        let mut f = good_fields();
+        f.output_id = -1;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_expand() {
+        let mut f = good_fields();
+        f.expand = 99;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_ema() {
+        let mut f = good_fields();
+        f.ema = 1.5;
+        assert!(f.validate().is_err());
+        f.ema = -0.1;
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn merge_update_rejects_zero_w() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.w = Some(0);
+        assert!(merge_update(&prior, &upd, "host").is_err());
+    }
+
+    #[test]
+    fn merge_update_rejects_invalid_fmt() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.fmt = Some("not-a-format".into());
+        let err = merge_update(&prior, &upd, "host").expect_err("must reject");
+        assert!(matches!(err, ControlError::BadRequest(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn merge_update_rejects_invalid_ddp_host() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.ddp_host = Some("not-an-ip".into());
+        let err = merge_update(&prior, &upd, "host").expect_err("must reject");
+        assert!(matches!(err, ControlError::BadRequest(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn merge_update_rejects_zero_ddp_port() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.ddp_port = Some(0);
+        assert!(merge_update(&prior, &upd, "host").is_err());
+    }
+
+    #[test]
+    fn merge_update_rejects_out_of_range_expand() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.expand = Some(7);
+        assert!(merge_update(&prior, &upd, "host").is_err());
+    }
+
+    #[test]
+    fn merge_update_rejects_out_of_range_ema() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.ema = Some(2.0);
+        assert!(merge_update(&prior, &upd, "host").is_err());
+    }
+
+    #[test]
+    fn merge_update_accepts_valid_changes() {
+        let prior = good_fields();
+        let mut upd = upd_default();
+        upd.w = Some(128);
+        upd.fmt = Some("rgb565le".into());
+        let merged = merge_update(&prior, &upd, "host").expect("ok");
+        assert_eq!(merged.width, 128);
+        assert_eq!(merged.fmt, PixelFormat::Rgb565Le);
+        assert_eq!(merged.height, prior.height);
+    }
 }

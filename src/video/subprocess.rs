@@ -6,7 +6,9 @@
 //! - **`-f rawvideo -pix_fmt rgb24`** on stdout — one byte frame of
 //!   `w * h * 3` per frame.
 //! - **`-vf showinfo`** in stderr for per-frame PTS. The parser matches on
-//!   `pts_time:<float>`.
+//!   `pts_time:<float>`. `showinfo` emits at `AV_LOG_INFO`, so we must run
+//!   ffmpeg at `-loglevel info` (or higher) — at `error` the lines are
+//!   suppressed and every frame falls back to a 33ms default delay.
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -35,13 +37,66 @@ type LastStderrErr = Arc<Mutex<Option<(ErrSeverity, String)>>>;
 /// `completion` receiver yields the final result once ffmpeg exits — `Ok`
 /// for clean exit, `Err(MediaError)` carrying the classified stderr line
 /// (e.g. "Server returned 403 Forbidden") for failures.
-pub struct FfmpegHandles {
+///
+/// Dropping the handles triggers an explicit ffmpeg kill via `_kill_tx`:
+/// the wait task selects on `child.wait()` vs the kill receiver, and
+/// dropping the sender resolves the receiver with `Err(RecvError)` on the
+/// same scheduler tick. Without this, a stalled HTTP read inside ffmpeg
+/// can keep the child alive long after the Rust side has cancelled —
+/// `kill_on_drop(true)` only fires when `Child` itself drops, but we move
+/// it into the wait task to call `wait()`. The kill channel re-establishes
+/// drop-driven termination.
+pub(crate) struct FfmpegHandles {
     pub frames: mpsc::Receiver<FfmpegFrame>,
     pub completion: oneshot::Receiver<Result<(), MediaError>>,
+    /// Drop guard the wait task watches: when this sender drops, the wait
+    /// task explicit-kills the ffmpeg child. The dispatch layer must move
+    /// it into the `VideoSource` (or another long-lived owner) so it
+    /// outlives the FrameSource consumer.
+    pub(crate) kill_guard: KillGuard,
+}
+
+/// Newtype wrapping the kill-channel sender. Carries no value — its only
+/// observable effect is when it drops, which resolves the matching
+/// receiver with `Err(RecvError)` and triggers the kill in the wait task.
+/// The inner sender is intentionally unread; the field exists only to be
+/// dropped.
+pub(crate) struct KillGuard(#[allow(dead_code)] oneshot::Sender<std::convert::Infallible>);
+
+impl KillGuard {
+    /// Construct a guard whose drop has no observable effect — the matching
+    /// receiver is dropped immediately. Used for tests that build a
+    /// `VideoSource` without a real ffmpeg subprocess behind it.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (tx, _rx) = oneshot::channel::<std::convert::Infallible>();
+        Self(tx)
+    }
 }
 
 /// Detects hung connections so reconnect can fire instead of stalling.
 const HTTP_RW_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Apply ffmpeg's HTTP reconnect/timeout flags to a `Command`. Used by
+/// the main spawn and the autocrop probe so a mid-stream TLS reset
+/// doesn't masquerade as a clean EOF (without reconnect, ffmpeg exits 0
+/// on the partial file). The two callers differ on `delay_max_secs` —
+/// the main pipeline gives reconnects more headroom, the probe wants to
+/// fail fast — but the rest of the chain is identical.
+pub(crate) fn add_http_reconnect_args(cmd: &mut Command, rw_timeout: Duration, delay_max_secs: u32) {
+    let timeout_us = rw_timeout.as_micros().to_string();
+    let delay = delay_max_secs.to_string();
+    cmd.arg("-reconnect")
+        .arg("1")
+        .arg("-reconnect_streamed")
+        .arg("1")
+        .arg("-reconnect_at_eof")
+        .arg("1")
+        .arg("-reconnect_delay_max")
+        .arg(&delay)
+        .arg("-rw_timeout")
+        .arg(&timeout_us);
+}
 
 #[derive(Debug)]
 pub struct FfmpegFrame {
@@ -77,15 +132,19 @@ pub struct FfmpegArgs<'a> {
 
 /// Spawn ffmpeg and stream RGB24 frames over a channel. Caller drops the
 /// channel to stop.
-pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoError> {
+pub(crate) async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoError> {
     let source_url = args.input.url().to_string();
     let frame_size = (args.output_width as usize) * (args.output_height as usize) * 3;
 
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner")
         .arg("-nostdin")
+        // `info` is required for `showinfo` (AV_LOG_INFO) to reach the
+        // stderr parser. The extra startup metadata at info level is
+        // harmless: the stderr classifier debug-routes anything it doesn't
+        // recognise as a known warning class.
         .arg("-loglevel")
-        .arg("error")
+        .arg("info")
         .arg("-fflags")
         .arg("+genpts+discardcorrupt");
 
@@ -93,22 +152,8 @@ pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoEr
         cmd.arg("-hwaccel").arg(b.as_ffmpeg_flag());
     }
 
-    // Without reconnect, a mid-stream TLS reset is treated as EOF and ffmpeg
-    // exits 0 with a partial file. The `cache:` wrapper doesn't shield this.
     if is_http_url(args.input.url()) {
-        let timeout_us = HTTP_RW_TIMEOUT.as_micros().to_string();
-        cmd.args([
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_at_eof",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-            "-rw_timeout",
-            &timeout_us,
-        ]);
+        add_http_reconnect_args(&mut cmd, HTTP_RW_TIMEOUT, 5);
     }
     if matches!(args.input, FfmpegInput::CachedLooping(_)) {
         cmd.args(["-stream_loop", "-1"]);
@@ -165,8 +210,23 @@ pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoEr
     tokio::spawn(frame_reader(stdout, frame_size, tx, pts_rx));
 
     let (completion_tx, completion_rx) = oneshot::channel();
+    let (kill_tx, mut kill_rx) = oneshot::channel::<std::convert::Infallible>();
     tokio::spawn(async move {
-        let status = child.wait().await;
+        // Two ways to leave: ffmpeg exits on its own, or the handles drop
+        // and `kill_rx` resolves (with Err since the sender is never used
+        // to send). On kill, we explicit-kill and reap; we skip emitting
+        // a completion result because the consumer has already gone away.
+        let status = tokio::select! {
+            s = child.wait() => Some(s),
+            _ = &mut kill_rx => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                None
+            }
+        };
+        let Some(status) = status else {
+            return;
+        };
         let last = last_err.lock().take();
         let result: Result<(), MediaError> = match status {
             Ok(s) if s.success() => Ok(()),
@@ -199,6 +259,7 @@ pub async fn spawn_ffmpeg(args: FfmpegArgs<'_>) -> Result<FfmpegHandles, VideoEr
     Ok(FfmpegHandles {
         frames: rx,
         completion: completion_rx,
+        kill_guard: KillGuard(kill_tx),
     })
 }
 
@@ -284,4 +345,87 @@ fn record_stderr_err(slot: &LastStderrErr, sev: ErrSeverity, line: &str) {
         return;
     }
     *g = Some((sev, line.to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Stdio;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Pins the assumption that drives `spawn_ffmpeg`'s log-level choice:
+    /// `showinfo` emits at `AV_LOG_INFO`, so the loglevel must be at least
+    /// `info` for the per-frame `pts_time:` lines to reach our stderr
+    /// parser. The previous setting of `error` silently suppressed every
+    /// PTS line and demoted timing to a fixed 33ms default. Reads enough
+    /// stderr to see at least two distinct pts values, then aborts ffmpeg.
+    #[tokio::test]
+    #[allow(clippy::print_stderr)]
+    async fn loglevel_info_emits_showinfo_pts_lines() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH; skipping loglevel_info_emits_showinfo_pts_lines");
+            return;
+        }
+        // 0.3s of 10fps synthetic input = 3 frames. Tiny size keeps the
+        // test fast (<200ms in practice).
+        let mut child = Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "info",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=0.3:size=16x16:rate=10",
+                "-vf",
+                "showinfo",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn ffmpeg");
+
+        let stderr = child.stderr.take().expect("stderr piped");
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        let mut pts_values: Vec<f64> = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(idx) = line.find("pts_time:") {
+                let rest = &line[idx + "pts_time:".len()..];
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+                    .unwrap_or(rest.len());
+                if let Ok(v) = rest[..end].parse::<f64>() {
+                    pts_values.push(v);
+                    if pts_values.len() >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = child.wait().await;
+        assert!(
+            pts_values.len() >= 2,
+            "expected >=2 distinct pts_time: lines, got {pts_values:?} — \
+             showinfo loglevel regression?"
+        );
+        assert!(
+            pts_values[1] > pts_values[0],
+            "pts must advance: got {pts_values:?}"
+        );
+    }
 }

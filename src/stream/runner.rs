@@ -13,13 +13,25 @@ use tracing::{debug, warn};
 use wide::f32x8;
 
 use crate::control::fields::StreamFields;
-use crate::error::StreamError;
+use crate::error::{MediaError, StreamError};
 use crate::output::sink::{Frame, FrameMeta, OutputSink};
 use crate::stream::frame_source::{FrameSource, RgbFrame};
 
 /// Upper bound on time between frames — if the source stalls this long we
 /// cut the stream and let the orchestrator decide whether to restart.
 const FRAME_WATCHDOG: Duration = Duration::from_secs(30);
+
+/// Watchdog trips surface as a retryable network condition rather than
+/// `Cancelled`, so the orchestrator's per-stream retry budget can rebuild
+/// the source instead of treating a stall as a permanent stop.
+fn watchdog_error(source_url: &str) -> StreamError {
+    StreamError::Media(MediaError::Network {
+        source_url: source_url.to_string(),
+        message: "frame watchdog tripped (>30s idle)".into(),
+        error_code: None,
+        retryable: true,
+    })
+}
 
 /// Run at the source's native cadence. One frame pulled → one frame emitted,
 /// with timing based on the frame's `delay_ms` hint. Returns the number of
@@ -52,7 +64,7 @@ pub async fn run_native(
             }
             Err(_) => {
                 warn!("frame watchdog tripped (>30s idle)");
-                return Err(StreamError::Cancelled);
+                return Err(watchdog_error(&fields.source));
             }
         };
         let RgbFrame { rgb888, delay_ms } = frame;
@@ -92,6 +104,10 @@ pub async fn run_native(
 /// so we don't need the heavier `tokio::Mutex`. The EMA path reuses one
 /// `BytesMut` across ticks instead of allocating a fresh out_buf + Bytes
 /// every emit.
+///
+/// Both sub-tasks return `Result<u64, StreamError>`: producer yields the
+/// frame count or the source-side error; sampler resolves only on a sink
+/// failure (otherwise loops forever, dropped when producer returns first).
 pub async fn run_paced(
     source: FrameSource,
     sink: &dyn OutputSink,
@@ -106,11 +122,24 @@ pub async fn run_paced(
     let producer = async {
         let mut source = source;
         let mut count: u64 = 0;
-        while let Some(f) = source.next().await {
-            count += 1;
-            *latest.lock() = Some(f.rgb888);
+        loop {
+            match time::timeout(FRAME_WATCHDOG, source.next()).await {
+                Ok(Some(f)) => {
+                    count += 1;
+                    *latest.lock() = Some(f.rgb888);
+                }
+                Ok(None) => {
+                    if let Some(err) = source.take_error().await {
+                        return Err(err);
+                    }
+                    return Ok(count);
+                }
+                Err(_) => {
+                    warn!("paced frame watchdog tripped (>30s idle)");
+                    return Err(watchdog_error(&fields.source));
+                }
+            }
         }
-        (count, source.take_error().await)
     };
 
     let sampler = async {
@@ -150,9 +179,9 @@ pub async fn run_paced(
                     is_still: false,
                     is_last_frame: false,
                 };
-                if let Err(e) = sink.send_frame(Frame { data, meta }).await {
-                    warn!(?e, "sink send failed in paced mode");
-                }
+                sink.send_frame(Frame { data, meta })
+                    .await
+                    .map_err(StreamError::Output)?;
                 seq = seq.wrapping_add(1);
             }
 
@@ -165,18 +194,17 @@ pub async fn run_paced(
                 next = now;
             }
         }
+        // Unreachable: the loop above only exits via `?` propagating a sink error.
+        // The trailing expression gives the async block a concrete `Ok` arm so
+        // both `select!` branches share `Result<u64, StreamError>`.
+        #[allow(unreachable_code)]
+        Ok::<u64, StreamError>(0)
     };
 
-    // Sampler runs forever; the select only resolves when the producer
-    // returns (source exhausted or errored).
-    let (count, producer_err): (u64, Option<StreamError>) = tokio::select! {
-        pair = producer => pair,
-        _ = sampler => (0, None),
-    };
-    if let Some(e) = producer_err {
-        return Err(e);
+    tokio::select! {
+        r = producer => r,
+        r = sampler => r,
     }
-    Ok(count)
 }
 
 /// Update an EMA accumulator from a u8 frame and write the rounded/clamped
@@ -290,5 +318,155 @@ mod tests {
             assert!((b - 200.0).abs() < 1e-4);
         }
         assert!(out.iter().all(|&v| v == 200));
+    }
+
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use async_trait::async_trait;
+    use tokio::sync::{mpsc, oneshot};
+
+    use crate::control::fields::{Fit, HwPref};
+    use crate::error::OutputError;
+    use crate::output::sink::PixelFormat;
+    use crate::stream::frame_source::{FrameSource, VideoSource};
+
+    fn test_fields() -> StreamFields {
+        StreamFields {
+            output_id: 0,
+            width: 4,
+            height: 4,
+            source: "test://input".into(),
+            ddp_port: 4048,
+            ddp_host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            r#loop: false,
+            expand: 0,
+            hw: HwPref::None,
+            fit: Fit::Pad,
+            fmt: PixelFormat::Rgb888,
+            pace: 30,
+            ema: 0.0,
+        }
+    }
+
+    fn test_video_source() -> (
+        FrameSource,
+        mpsc::Sender<RgbFrame>,
+        oneshot::Sender<Result<(), MediaError>>,
+    ) {
+        use crate::video::subprocess::KillGuard;
+        let (tx, rx) = mpsc::channel::<RgbFrame>(8);
+        let (comp_tx, comp_rx) = oneshot::channel::<Result<(), MediaError>>();
+        let src = FrameSource::Video(VideoSource::new(rx, comp_rx, KillGuard::detached()));
+        (src, tx, comp_tx)
+    }
+
+    struct CountingSink {
+        sent: AtomicU32,
+        fail_after: u32,
+    }
+
+    impl CountingSink {
+        fn new(fail_after: u32) -> Self {
+            Self {
+                sent: AtomicU32::new(0),
+                fail_after,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OutputSink for CountingSink {
+        async fn send_frame(&self, _frame: Frame) -> Result<(), OutputError> {
+            let n = self.sent.fetch_add(1, Ordering::Relaxed) + 1;
+            if n >= self.fail_after {
+                return Err(OutputError::Sink("test forced send failure".into()));
+            }
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), OutputError> {
+            Ok(())
+        }
+    }
+
+    fn rgb_frame(n: usize) -> RgbFrame {
+        RgbFrame {
+            rgb888: Bytes::from(vec![0u8; n]),
+            delay_ms: 33.0,
+        }
+    }
+
+    /// Paced watchdog: source never produces a frame, watchdog must trip
+    /// with a retryable error (so the orchestrator's retry budget applies).
+    #[tokio::test(start_paused = true)]
+    async fn paced_watchdog_returns_retryable() {
+        let (source, _tx, _comp) = test_video_source();
+        let sink = CountingSink::new(u32::MAX);
+        let fields = test_fields();
+
+        let result = tokio::select! {
+            r = run_paced(source, &sink, &fields) => r,
+            () = async {
+                // Advance past the watchdog window.
+                tokio::time::advance(FRAME_WATCHDOG + Duration::from_secs(1)).await;
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        };
+
+        let err = result.expect_err("watchdog must trip");
+        match err {
+            StreamError::Media(MediaError::Network { retryable: true, .. }) => {}
+            other => panic!("expected retryable Network error, got {other:?}"),
+        }
+    }
+
+    /// Native watchdog: same shape — must surface a retryable error so the
+    /// orchestrator can rebuild the source instead of giving up.
+    #[tokio::test(start_paused = true)]
+    async fn native_watchdog_returns_retryable() {
+        let (source, _tx, _comp) = test_video_source();
+        let sink = CountingSink::new(u32::MAX);
+        let mut fields = test_fields();
+        fields.pace = 0;
+
+        let result = tokio::select! {
+            r = run_native(source, &sink, &fields) => r,
+            () = async {
+                tokio::time::advance(FRAME_WATCHDOG + Duration::from_secs(1)).await;
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        };
+
+        let err = result.expect_err("watchdog must trip");
+        match err {
+            StreamError::Media(MediaError::Network { retryable: true, .. }) => {}
+            other => panic!("expected retryable Network error, got {other:?}"),
+        }
+    }
+
+    /// Paced sink failure must propagate, not be swallowed: the runner
+    /// returns the Output error so the orchestrator sees the broken sink.
+    #[tokio::test(start_paused = true)]
+    async fn paced_sink_error_propagates() {
+        let (source, tx, _comp) = test_video_source();
+        let sink = CountingSink::new(1); // fail on first send
+        let fields = test_fields();
+
+        // Push one frame so the sampler has something to send.
+        tx.send(rgb_frame(fields.width as usize * fields.height as usize * 3))
+            .await
+            .unwrap();
+
+        let result = tokio::select! {
+            r = run_paced(source, &sink, &fields) => r,
+            () = async {
+                // Let the sampler tick at least once; pace=30 → 33ms tick.
+                tokio::time::advance(Duration::from_millis(100)).await;
+                std::future::pending::<()>().await;
+            } => unreachable!(),
+        };
+
+        let err = result.expect_err("sink failure must surface");
+        assert!(matches!(err, StreamError::Output(_)), "got {err:?}");
     }
 }

@@ -12,6 +12,7 @@ pub mod autocrop;
 pub mod dispatch;
 pub mod filter_graph;
 pub mod hwaccel;
+pub mod probe;
 pub mod subprocess;
 pub mod timing;
 

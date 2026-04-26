@@ -160,6 +160,22 @@ pub enum ResolverError {
     Unavailable(String),
 }
 
+impl ResolverError {
+    /// Resolver-time errors are never retried by the orchestrator. This
+    /// matches the Python reference: `yt_dlp.DownloadError`, spawn
+    /// failures, JSON parse errors, and HTTP timeouts during resolution
+    /// all surface immediately. Streaming-time network errors that *can*
+    /// be retried flow through `MediaError::Network::retryable` after
+    /// resolution has already succeeded — they don't come back through
+    /// this enum.
+    ///
+    /// Kept as a method (rather than a flat `false` in the orchestrator)
+    /// so future per-variant selectivity has an obvious extension point.
+    pub fn is_retryable(&self) -> bool {
+        false
+    }
+}
+
 impl From<reqwest::Error> for ResolverError {
     fn from(e: reqwest::Error) -> Self {
         Self::Http(e.to_string())

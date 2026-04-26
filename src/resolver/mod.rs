@@ -62,9 +62,11 @@ impl ResolveResponse {
 
     /// Should the ffmpeg `cache:` protocol wrap this URL? Enabled for
     /// looping playback of small files (typical YouTube short clips), where
-    /// fetching the same bytes per loop is wasteful.
-    pub fn should_cache(&self, r#loop: bool, max_bytes: u64) -> bool {
-        r#loop && self.filesize.is_some_and(|sz| sz <= max_bytes)
+    /// fetching the same bytes per loop is wasteful. When the operator
+    /// disables caching via config, the orchestrator's rebuild-on-loop path
+    /// handles repetition instead.
+    pub fn should_cache(&self, r#loop: bool, enabled: bool, max_bytes: u64) -> bool {
+        enabled && r#loop && self.filesize.is_some_and(|sz| sz <= max_bytes)
     }
 }
 
@@ -81,3 +83,39 @@ pub use http::HttpResolver;
 pub use noop::NoopResolver;
 pub use passthrough::PassthroughLayer;
 pub use subprocess::SubprocessResolver;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resp(filesize: Option<u64>) -> ResolveResponse {
+        ResolveResponse {
+            stream_url: "x".into(),
+            headers: Default::default(),
+            fps: None,
+            codec: None,
+            filesize,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn cache_disabled_overrides_loop_and_size() {
+        let r = resp(Some(1_000_000));
+        assert!(!r.should_cache(true, false, 5_000_000));
+    }
+
+    #[test]
+    fn cache_enabled_requires_loop_and_size_under_limit() {
+        let r = resp(Some(1_000_000));
+        assert!(r.should_cache(true, true, 5_000_000));
+        assert!(!r.should_cache(false, true, 5_000_000));
+        assert!(!r.should_cache(true, true, 500_000));
+    }
+
+    #[test]
+    fn cache_enabled_unknown_size_does_not_cache() {
+        let r = resp(None);
+        assert!(!r.should_cache(true, true, 5_000_000));
+    }
+}

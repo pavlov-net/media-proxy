@@ -26,16 +26,23 @@ pub struct VideoSource {
     /// classified `MediaError` (e.g. "Server returned 403 Forbidden") on
     /// failure. `take_error()` consumes this after `next()` returns `None`.
     completion: Option<oneshot::Receiver<Result<(), MediaError>>>,
+    /// Drop-only guard: when the source drops, the inner sender drops, the
+    /// matching receiver in the ffmpeg wait task fires, and the child is
+    /// explicit-killed. Without this, a stalled ffmpeg input read can keep
+    /// the subprocess alive after we cancel the stream.
+    _kill_guard: crate::video::subprocess::KillGuard,
 }
 
 impl VideoSource {
-    pub fn new(
+    pub(crate) fn new(
         rx: tokio::sync::mpsc::Receiver<RgbFrame>,
         completion: oneshot::Receiver<Result<(), MediaError>>,
+        kill_guard: crate::video::subprocess::KillGuard,
     ) -> Self {
         Self {
             rx,
             completion: Some(completion),
+            _kill_guard: kill_guard,
         }
     }
 }
