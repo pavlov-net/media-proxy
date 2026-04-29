@@ -1,6 +1,6 @@
 # Third-party licenses
 
-This project bundles/references the following third-party assets:
+This project bundles the following third-party assets:
 
 ## Fonts
 
@@ -8,7 +8,7 @@ This project bundles/references the following third-party assets:
 - Author: Frederic Cambus
 - Source: https://github.com/fcambus/spleen
 - License: BSD 2-Clause License
-- File(s): `src/fonts/spleen-*.bdf`
+- File(s): `assets/fonts/spleen-*.bdf` (embedded into the binary via `include_str!`)
 
 ```
 BSD 2-Clause License
@@ -37,39 +37,3 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
-
----
-
-### Material Design Icons Webfont
-- Author: Austin Andrews and the Pictogrammers icon group
-- Source: https://github.com/Templarian/MaterialDesign-Webfont
-- License: Pictogrammers Free License
-  - Icons: Apache 2.0
-  - Fonts: Apache 2.0
-  - Code: MIT
-- File(s): `src/fonts/materialdesignicons-webfont.ttf`
-
-```
-Pictogrammers Free License
---------------------------
-
-This icon collection is released as free, open source, and GPL friendly by
-the Pictogrammers icon group. You may use it for commercial projects, open
-source projects, or anything really.
-
-# Icons: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
-Some of the icons are redistributed under the Apache 2.0 license. All other
-icons are either redistributed under their respective licenses or are
-distributed under the Apache 2.0 license.
-
-# Fonts: Apache 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
-All web and desktop fonts are distributed under the Apache 2.0 license. Web
-and desktop fonts contain some icons that are redistributed under the Apache
-2.0 license. All other icons are either redistributed under their respective
-licenses or are distributed under the Apache 2.0 license.
-
-# Code: MIT (https://opensource.org/licenses/MIT)
-The MIT license applies to all non-font and non-icon files.
-```
-
----
