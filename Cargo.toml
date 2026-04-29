@@ -34,7 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.1"
 figment = { version = "0.10", features = ["toml", "yaml", "json", "env"] }
 
 # CLI
@@ -51,7 +51,7 @@ bytes = "1.11"
 bytemuck = { version = "1.25", features = ["derive"] }
 wide = "1"
 parking_lot = "0.12"
-rand = "0.9"
+rand = "0.10"
 which = "8"
 url = "2.5"
 percent-encoding = "2"
@@ -73,15 +73,15 @@ png = "0.18"
 image-webp = { git = "https://github.com/image-rs/image-webp", branch = "main" }
 
 # REST / animimg (Phase 1)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Media"] }
+windows-sys = { version = "0.61", features = ["Win32_Media"] }
 
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1.52", features = ["test-util", "macros"] }
-axum-test = "17"
+axum-test = "20"
 tempfile = "3"
 
 [profile.release]
