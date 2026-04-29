@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
