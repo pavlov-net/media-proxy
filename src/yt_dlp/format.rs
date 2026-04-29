@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn matches_python_golden_fixtures() {
-        let raw = include_str!("../../tests/fixtures/yt_dlp_format/fixtures.json");
+        let raw = include_str!("fixtures.json");
         let fixtures: Vec<Fixture> = serde_json::from_str(raw).expect("parse fixtures");
         assert!(!fixtures.is_empty(), "no fixtures loaded");
 

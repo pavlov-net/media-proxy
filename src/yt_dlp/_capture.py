@@ -1,6 +1,6 @@
-# Re-run via:  python3 tests/fixtures/yt_dlp_format/_capture.py
+# Re-run via:  python3 src/yt_dlp/_capture.py
 #
-# Mirrors main:src/media/sources.py:build_yt_dlp_format() exactly. Re-extracts
+# Mirrors the pre-rewrite Python build_yt_dlp_format() exactly. Re-extracts
 # `try_60fps` as a parameter (Python read it from the global Config singleton)
 # and writes one fixture file per (height, hw, prefer_60fps, video_only) combo
 # so the Rust port can golden-test against them.
