@@ -81,7 +81,7 @@ windows-sys = { version = "0.61", features = ["Win32_Media"] }
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1.52", features = ["test-util", "macros"] }
-axum-test = "20"
+axum-test = "21"
 tempfile = "3"
 
 [profile.release]
