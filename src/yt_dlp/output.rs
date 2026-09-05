@@ -1,24 +1,18 @@
-//! Parsing helpers for `yt-dlp -j` stdout. The shape of `Info` is the
-//! intersection we actually consume, not yt-dlp's full info-dict schema.
-//! `serde(default)` everywhere because extractors are inconsistent about
-//! which fields they populate (e.g. live streams skip `filesize`).
+//! Parses the yt-dlp fields consumed by resolution. Optional fields accommodate
+//! extractors that omit metadata such as frame rate or file size.
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 
-/// Subset of yt-dlp's info-dict that we use. yt-dlp emits dozens of fields;
-/// we only deserialize the ones the resolver consumes.
+/// Extraction metadata consumed by the resolver.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Info {
-    /// The selected stream URL. Populated when `-f` picks a single format
-    /// (i.e. no `+` merge). For merged selections the URL lives in
-    /// `requested_formats[*].url` instead — we don't support that here.
+    /// Selected format URL. Merged `requested_formats` output is unsupported.
     #[serde(default)]
     pub url: Option<String>,
 
-    /// Per-stream HTTP headers (User-Agent, Accept-Language, etc.) that the
-    /// CDN expects. Forwarded into ffmpeg's `-headers` option verbatim.
+    /// Upstream HTTP headers; dispatch rejects entries containing control characters.
     #[serde(default)]
     pub http_headers: Option<HashMap<String, String>>,
 
@@ -32,17 +26,13 @@ pub struct Info {
     #[serde(default)]
     pub filesize: Option<u64>,
 
-    /// yt-dlp's range-derived size estimate when the exact size isn't known
-    /// up front. Use as a fallback when `filesize` is absent.
+    /// Estimated size in bytes, used when `filesize` is absent.
     #[serde(default)]
     pub filesize_approx: Option<u64>,
 }
 
-/// Extract the unix-second expiry timestamp from a googlevideo CDN URL.
-///
-/// YouTube stream URLs include `?expire=<unix-seconds>`. Returns `None` for
-/// any URL that doesn't carry the parameter (non-YouTube extractors,
-/// non-googlevideo hosts, malformed URLs).
+/// Returns an integer `expire` query parameter in Unix seconds, regardless of host.
+/// Missing or malformed values return `None`.
 pub fn parse_googlevideo_expire(url: &str) -> Option<i64> {
     url.split_once('?')?
         .1
@@ -90,7 +80,6 @@ mod tests {
 
     #[test]
     fn info_deserializes_minimal_yt_dlp_output() {
-        // Minimum yt-dlp -j output for a non-YouTube extractor.
         let json = r#"{"url": "https://cdn.example/v.mp4", "vcodec": "h264"}"#;
         let info: Info = serde_json::from_str(json).expect("parse");
         assert_eq!(info.url.as_deref(), Some("https://cdn.example/v.mp4"));
@@ -117,7 +106,6 @@ mod tests {
 
     #[test]
     fn info_tolerates_unknown_fields() {
-        // yt-dlp's info-dict is huge; we should ignore everything we don't ask for.
         let json = r#"{
             "url": "x",
             "title": "ignored",

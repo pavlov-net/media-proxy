@@ -29,10 +29,8 @@ impl LogLevel {
     }
 }
 
-/// Initialize `tracing` with a compact output format that's readable at a
-/// glance and cheap to grep: `LEVEL target: message field=value …`. Drops
-/// the default ISO-8601 timestamp (systemd / Docker / the tty already stamp
-/// lines) and the ANSI colors (use `RUST_LOG_STYLE=always` to force them).
+/// Initializes compact tracing without timestamps. `RUST_LOG` overrides the
+/// configured level; `RUST_LOG_STYLE=always` enables ANSI colors.
 pub fn init(level: LogLevel) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("media_proxy={}", level.as_filter())));

@@ -1,15 +1,15 @@
-//! Glyph blitter — stamps BDF glyph bitmaps onto an RGB888 canvas.
+//! BDF glyph rendering onto RGB888 canvases.
 
 use crate::render::bdf::{BdfFont, Glyph};
 
-/// Per-call canvas + style pinned to one place so we're not juggling 8 args.
+/// Mutable RGB888 pixels and dimensions shared by glyph draws.
 pub struct Canvas<'a> {
     pub pixels: &'a mut [u8],
     pub width: u32,
     pub height: u32,
 }
 
-/// Blit a single glyph at pen position `(pen_x, pen_y)`. The glyph's own BBX
+/// Blits a single glyph at pen position `(pen_x, pen_y)`. The glyph's own BBX
 /// offsets position its bitmap relative to the origin; baseline sits at
 /// `pen_y + font_ascent`.
 pub fn blit_glyph(
@@ -45,7 +45,7 @@ pub fn blit_glyph(
     }
 }
 
-/// Blit a string, returning the pen advance after the last glyph.
+/// Draws a string and returns the final pen x-coordinate.
 pub fn blit_string(
     canvas: &mut Canvas<'_>,
     font: &BdfFont,

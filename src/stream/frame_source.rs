@@ -1,7 +1,4 @@
-//! Frame source enum — the hot-path dispatch point for every stream.
-//!
-//! Enum (not trait object) per `rust.md` §Architectural Decisions:
-//! pattern-match on one of `Video`, `StaticImage`, `Animated`.
+//! Frame iteration for video channels, static images, and cached animations.
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -22,14 +19,9 @@ pub enum FrameSource {
 
 pub struct VideoSource {
     pub rx: tokio::sync::mpsc::Receiver<RgbFrame>,
-    /// Filled by the ffmpeg-wait task with `Ok(())` on clean exit or a
-    /// classified `MediaError` (e.g. "Server returned 403 Forbidden") on
-    /// failure. `take_error()` consumes this after `next()` returns `None`.
+    /// ffmpeg exit result, consumed by `take_error` after frame delivery ends.
     completion: Option<oneshot::Receiver<Result<(), MediaError>>>,
-    /// Drop-only guard: when the source drops, the inner sender drops, the
-    /// matching receiver in the ffmpeg wait task fires, and the child is
-    /// explicit-killed. Without this, a stalled ffmpeg input read can keep
-    /// the subprocess alive after we cancel the stream.
+    /// Stops the ffmpeg worker when this source drops, including stalled input reads.
     _kill_guard: crate::video::subprocess::KillGuard,
 }
 
@@ -82,10 +74,8 @@ impl FrameSource {
         }
     }
 
-    /// After `next()` returns `None`, ask the source whether it ended
-    /// cleanly or with an error. Static and animated sources never error;
-    /// for video, this awaits the ffmpeg exit-status oneshot and returns
-    /// the classified error if any.
+    /// Returns the video process error after `next` yields `None`.
+    /// Static and animated sources return no error; video waits for process completion.
     pub async fn take_error(&mut self) -> Option<StreamError> {
         match self {
             Self::Video(v) => {
@@ -100,9 +90,8 @@ impl FrameSource {
         }
     }
 
-    /// Reset iteration state so the next `next()` re-emits from the start.
-    /// Returns `false` for `Video` — ffmpeg owns its own loop via
-    /// `-stream_loop -1`, the orchestrator handles the rebuild path.
+    /// Rewinds static and animated sources. Returns `false` for video, whose
+    /// repetition requires ffmpeg seeking or rebuilding through the orchestrator.
     pub fn try_rewind(&mut self) -> bool {
         match self {
             Self::Video(_) => false,

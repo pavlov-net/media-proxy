@@ -1,8 +1,4 @@
-//! Palette-preserving resize for indexed / transparency-index images.
-//!
-//! Resize the *indices* with nearest-neighbor, then map back through the
-//! palette. Keeps pixel-art LED content crisp and avoids the quantization
-//! losses you'd get from resampling RGB.
+//! Nearest-neighbor resizing of palette indices preserves pixel-art colors.
 
 use crate::error::ImageError;
 
@@ -16,11 +12,8 @@ pub struct Paletted {
 }
 
 impl Paletted {
-    /// Resize indices with nearest-neighbor, then expand through the palette.
-    ///
-    /// Transparent pixels blend onto a black background (LED default).
-    /// Source-x and source-y nearest-neighbor maps are precomputed once each
-    /// — the inner loop is two indexed loads and three byte writes per pixel.
+    /// Resizes palette indices and expands to RGB888 over black.
+    /// The transparency index maps to black.
     pub fn resize_to_rgb888(&self, dst_w: u32, dst_h: u32) -> Result<Vec<u8>, ImageError> {
         if dst_w == 0 || dst_h == 0 {
             return Err(ImageError::Resize("dst dimensions zero".into()));
@@ -36,8 +29,7 @@ impl Paletted {
             .map(|y| (((y as f64 + 0.5) * sh / dst_h as f64).floor() as u32).min(last_y))
             .collect();
 
-        // Pre-expand the palette to RGB888 with the transparency index
-        // collapsed to black, so the inner loop has no per-pixel branches.
+        // Pre-expanding the palette avoids per-pixel transparency branches.
         let palette_size = self.palette_rgb.len().max(1);
         let mut palette_rgb888 = vec![0u8; palette_size * 3];
         for (i, rgb) in self.palette_rgb.iter().enumerate() {

@@ -1,8 +1,5 @@
-//! Per-stream runners: native cadence and paced mode.
-//!
-//! Native runs at the source's frame timing; paced samples the latest frame
-//! at a fixed `pace_hz` with optional EMA blending. Both reset their
-//! deadline when more than 100ms behind to prevent runaway catch-up bursts.
+//! Native playback follows source delays; paced playback samples the latest
+//! frame at a fixed rate with optional EMA blending. Late deadlines reset to limit bursts.
 
 use std::time::{Duration, Instant};
 
@@ -17,13 +14,10 @@ use crate::error::{MediaError, StreamError};
 use crate::output::sink::{Frame, FrameMeta, OutputSink};
 use crate::stream::frame_source::{FrameSource, RgbFrame};
 
-/// Upper bound on time between frames — if the source stalls this long we
-/// cut the stream and let the orchestrator decide whether to restart.
+/// Maximum wait for a source frame before retryable failure.
 const FRAME_WATCHDOG: Duration = Duration::from_secs(30);
 
-/// Watchdog trips surface as a retryable network condition rather than
-/// `Cancelled`, so the orchestrator's per-stream retry budget can rebuild
-/// the source instead of treating a stall as a permanent stop.
+/// Marks a stalled source as retryable so the orchestrator can rebuild it.
 fn watchdog_error(source_url: &str) -> StreamError {
     StreamError::Media(MediaError::Network {
         source_url: source_url.to_string(),
@@ -33,10 +27,8 @@ fn watchdog_error(source_url: &str) -> StreamError {
     })
 }
 
-/// Run at the source's native cadence. One frame pulled → one frame emitted,
-/// with timing based on the frame's `delay_ms` hint. Returns the number of
-/// frames emitted so the orchestrator can detect a source that died
-/// immediately (e.g. ffmpeg failing on a 403) versus one that ran normally.
+/// Emits frames at source cadence and returns the emitted count.
+/// Source, watchdog, and sink failures propagate to the orchestrator.
 pub async fn run_native(
     mut source: FrameSource,
     sink: &dyn OutputSink,
@@ -95,19 +87,9 @@ pub async fn run_native(
     }
 }
 
-/// Paced mode: producer pushes latest frame into a shared slot at source
-/// cadence; sampler emits `pace_hz` times per second, optionally EMA-blended
-/// against the previous emit.
-///
-/// The shared slot is a `parking_lot::Mutex<Option<Bytes>>` — the lock is
-/// only held for the duration of a clone or a swap, never across `.await`,
-/// so we don't need the heavier `tokio::Mutex`. The EMA path reuses one
-/// `BytesMut` across ticks instead of allocating a fresh out_buf + Bytes
-/// every emit.
-///
-/// Both sub-tasks return `Result<u64, StreamError>`: producer yields the
-/// frame count or the source-side error; sampler resolves only on a sink
-/// failure (otherwise loops forever, dropped when producer returns first).
+/// Samples source-paced frames at the requested rate, with optional EMA.
+/// Returns the produced frame count when the source ends, or a source/sink error.
+/// The shared frame lock is held only during swaps and clones, never across awaits.
 pub async fn run_paced(
     source: FrameSource,
     sink: &dyn OutputSink,
@@ -129,16 +111,12 @@ pub async fn run_paced(
                 Ok(Some(f)) => {
                     count += 1;
                     *latest.lock() = Some(f.rgb888);
-                    // A short, finite source can end before the sampler's
-                    // first tick. Do not report successful playback until
-                    // the first frame has actually reached the sink.
+                    // A finite source must reach the sink before completing, even at a slow pace.
                     if count == 1 {
                         first_emitted.notified().await;
                         deadline = time::Instant::now();
                     }
-                    // Decoders can produce much faster than playback. Keep
-                    // the producer on source cadence so sampling tracks
-                    // playback time.
+                    // Throttle decoding to source cadence so sampling follows playback time.
                     deadline += Duration::from_secs_f32(f.delay_ms.max(10.0) / 1000.0);
                     let now = time::Instant::now();
                     if deadline + Duration::from_millis(100) < now {
@@ -215,13 +193,10 @@ pub async fn run_paced(
             if next > now {
                 time::sleep(next - now).await;
             } else {
-                // Missed tick — reset.
                 next = now;
             }
         }
-        // Unreachable: the loop above only exits via `?` propagating a sink error.
-        // The trailing expression gives the async block a concrete `Ok` arm so
-        // both `select!` branches share `Result<u64, StreamError>`.
+        // Supplies the async block's result type; sink failures exit through `?`.
         #[allow(unreachable_code)]
         Ok::<u64, StreamError>(0)
     };
@@ -232,16 +207,9 @@ pub async fn run_paced(
     }
 }
 
-/// Update an EMA accumulator from a u8 frame and write the rounded/clamped
-/// u8 result into `out`. SIMD path processes 8 lanes at a time via
-/// `wide::f32x8`; tail handled scalar. With `target-cpu=x86-64-v3` this maps
-/// to AVX2 + FMA.
-///
-/// Math: `buf[i] = buf[i] * (1-α) + src[i] * α`, then
-/// `out[i] = clamp(round(buf[i]), 0, 255) as u8`.
-///
-/// Both paths use `mul_add` to fuse the multiply-add into a single rounded
-/// op, so the SIMD and scalar lanes produce bit-identical buffers.
+/// Blends `src` into the EMA accumulator and rounds/clamps output to bytes.
+/// The update is `buf * (1 - alpha) + src * alpha`; SIMD and scalar paths
+/// both use `mul_add` to keep their rounding consistent.
 fn ema_blend_into(buf: &mut [f32], src: &[u8], alpha: f32, out: &mut [u8]) {
     debug_assert_eq!(buf.len(), src.len());
     debug_assert_eq!(buf.len(), out.len());
@@ -277,7 +245,6 @@ fn ema_blend_into(buf: &mut [f32], src: &[u8], alpha: f32, out: &mut [u8]) {
             f32::from(src[i + 6]),
             f32::from(src[i + 7]),
         ]);
-        // FMA: sv * alpha_v + bv * inv_v, computed as one fused op.
         let new_b = sv.mul_add(alpha_v, bv * inv_v);
         let new_b_arr = new_b.to_array();
         buf[i..i + 8].copy_from_slice(&new_b_arr);
@@ -442,8 +409,6 @@ mod tests {
         assert_eq!(sink.sent.load(Ordering::Relaxed), 1);
     }
 
-    /// Paced watchdog: source never produces a frame, watchdog must trip
-    /// with a retryable error (so the orchestrator's retry budget applies).
     #[tokio::test(start_paused = true)]
     async fn paced_watchdog_returns_retryable() {
         let (source, _tx, _comp) = test_video_source();
@@ -453,7 +418,6 @@ mod tests {
         let result = tokio::select! {
             r = run_paced(source, &sink, &fields) => r,
             () = async {
-                // Advance past the watchdog window.
                 tokio::time::advance(FRAME_WATCHDOG + Duration::from_secs(1)).await;
                 std::future::pending::<()>().await;
             } => unreachable!(),
@@ -466,8 +430,6 @@ mod tests {
         }
     }
 
-    /// Native watchdog: same shape — must surface a retryable error so the
-    /// orchestrator can rebuild the source instead of giving up.
     #[tokio::test(start_paused = true)]
     async fn native_watchdog_returns_retryable() {
         let (source, _tx, _comp) = test_video_source();
@@ -490,15 +452,12 @@ mod tests {
         }
     }
 
-    /// Paced sink failure must propagate, not be swallowed: the runner
-    /// returns the Output error so the orchestrator sees the broken sink.
     #[tokio::test(start_paused = true)]
     async fn paced_sink_error_propagates() {
         let (source, tx, _comp) = test_video_source();
         let sink = CountingSink::new(1); // fail on first send
         let fields = test_fields();
 
-        // Push one frame so the sampler has something to send.
         tx.send(rgb_frame(fields.width as usize * fields.height as usize * 3))
             .await
             .unwrap();
@@ -506,7 +465,6 @@ mod tests {
         let result = tokio::select! {
             r = run_paced(source, &sink, &fields) => r,
             () = async {
-                // Let the sampler tick at least once; pace=30 → 33ms tick.
                 tokio::time::advance(Duration::from_millis(100)).await;
                 std::future::pending::<()>().await;
             } => unreachable!(),

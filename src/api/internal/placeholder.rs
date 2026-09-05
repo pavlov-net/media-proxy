@@ -1,10 +1,5 @@
-//! `GET /api/internal/placeholder/{spec}` — generate a PNG with text.
-//!
-//! URL patterns (extension required):
-//!   /placeholder/64x64.png
-//!   /placeholder/600x400/orange/white.png
-//!   /placeholder/600x400/ff0000.png
-//!   /placeholder/800.png?text=Hello+World
+//! PNG placeholders with optional dimensions, colors and BBCode text.
+//! The spec ends in `.png`; dimensions are `widthxheight` or a square side.
 
 use std::io::Cursor;
 

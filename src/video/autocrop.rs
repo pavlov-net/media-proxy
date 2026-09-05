@@ -1,17 +1,5 @@
-//! Black-bar autocrop.
-//!
-//! Algorithm:
-//! - Probe N frames.
-//! - For each, walk inward from each edge; stop once a row/column's median
-//!   luma exceeds `luma_thresh`.
-//! - Cap walk distance at `max_bar_ratio * dim`.
-//! - Record per-frame results; take per-edge median at end of probe.
-//!
-//! The probe is run in a tiny scaled-down grayscale space (`PROBE_W` x
-//! `PROBE_H`) for speed; the resulting bar widths are scaled back into
-//! source pixel coordinates before being handed to the filter graph's
-//! `crop=` filter. This preserves Python's logical behaviour while
-//! avoiding a full-resolution decode pass.
+//! Detects black bars from grayscale frame samples. Edge medians are capped by
+//! `max_bar_ratio`, then mapped from probe dimensions to source pixels.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -26,21 +14,17 @@ use crate::stream::url::is_http_url;
 use crate::video::filter_graph::AutocropRect;
 use crate::video::subprocess::add_http_reconnect_args;
 
-/// Tiny working resolution for the probe. Big enough to give edge walks
-/// useful resolution while keeping the decode cheap on live sources.
+/// Probe dimensions balance edge precision against decoding cost.
 const PROBE_W: u32 = 160;
 const PROBE_H: u32 = 120;
 
-/// Hard ceiling on probe wall time. Live sources (RTSP/MJPEG) can stall
-/// indefinitely if the network blips during the brief decode window;
-/// we'd rather skip autocrop than block stream startup.
+/// Limits probe time so stalled live sources cannot block stream startup.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Reused for ffmpeg's `-rw_timeout` so HTTP reads can't outlive the
-/// outer probe budget.
+/// HTTP read timeout, shorter than the outer probe budget.
 const HTTP_RW_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// Compute the median-of-medians for each edge over a set of per-frame samples.
+/// Returns per-edge medians across frame samples.
 pub fn median_rect(samples: &[AutocropRect]) -> Option<AutocropRect> {
     if samples.is_empty() {
         return None;
@@ -61,15 +45,9 @@ pub fn median_rect(samples: &[AutocropRect]) -> Option<AutocropRect> {
     })
 }
 
-/// Decode `cfg.probe_frames` frames at a small grayscale resolution,
-/// detect black bars per frame, and return the median rect in **probe
-/// coordinates** (`PROBE_W × PROBE_H`). The caller maps it back to
-/// source coordinates with [`finalize_autocrop_rect`] once source dims
-/// are known — this split lets the autocrop probe run in parallel with
-/// the ffprobe metadata pre-pass that supplies those dims.
-///
-/// Returns `None` on timeout, ffmpeg failure, or a frame budget that
-/// produces no usable samples — the caller falls back to "no crop".
+/// Returns median bar widths in probe coordinates; `None` means probing failed
+/// or produced no frames. Use [`finalize_autocrop_rect`] once source dimensions
+/// are available, allowing this probe to run alongside metadata extraction.
 pub async fn probe_autocrop_rect(
     url: &str,
     headers: Option<&str>,
@@ -105,9 +83,7 @@ pub async fn probe_autocrop_rect(
     median_rect(&samples)
 }
 
-/// Map a probe-coordinate rect back to source pixels and apply
-/// `min_bar_px`. Pulled out so dispatch can delay the source-dim
-/// dependency to after both probes complete.
+/// Maps probe edges to source pixels and suppresses bars below `min_bar_px`.
 pub fn finalize_autocrop_rect(
     probe: AutocropRect,
     src_dims: (u32, u32),
@@ -162,9 +138,7 @@ async fn decode_grayscale_frames(
         let mut buf = vec![0u8; frame_bytes];
         match stdout.read_exact(&mut buf).await {
             Ok(_) => frames.push(buf),
-            // EOF before we hit the frame budget — short clip, partial
-            // probe is fine. Any caller that gets zero frames will skip
-            // autocrop in `probe_autocrop`.
+            // Short clips can provide fewer samples; zero samples disable autocrop.
             Err(_) => break,
         }
     }
@@ -172,10 +146,8 @@ async fn decode_grayscale_frames(
     Ok(frames)
 }
 
-/// Walk inward from each edge, stop at the first row/column whose median
-/// luma exceeds `luma_thresh`. The walk is capped at
-/// `max_bar_ratio * dim` so brightly lit content with a single dark band
-/// (e.g. a starry night sky) doesn't get mistaken for a letterbox.
+/// Finds each edge's first row or column above `luma_thresh`.
+/// `max_bar_ratio` limits cropping of dark content mistaken for letterboxing.
 fn detect_bars(frame: &[u8], w: u32, h: u32, cfg: &AutocropConfig) -> AutocropRect {
     let max_v = ((h as f32) * cfg.max_bar_ratio).floor() as u32;
     let max_h = ((w as f32) * cfg.max_bar_ratio).floor() as u32;
@@ -189,9 +161,7 @@ fn detect_bars(frame: &[u8], w: u32, h: u32, cfg: &AutocropConfig) -> AutocropRe
     }
 }
 
-/// Step from index 0 toward `max`, return the first index whose median
-/// luma exceeds `thresh`. Returns `max` if the whole walk stayed below
-/// threshold (i.e. a fully-black band hit the cap).
+/// Returns the first index above `thresh`, or `max` if the band stays dark.
 fn walk_edge(max: u32, thresh: u8, median_at: impl Fn(u32) -> u8) -> u32 {
     for i in 0..max {
         if median_at(i) > thresh {
@@ -216,9 +186,8 @@ fn col_median(frame: &[u8], w: u32, h: u32, col: u32) -> u8 {
     buf[buf.len() / 2]
 }
 
-/// Map a probe-resolution rect back to source coordinates and apply the
-/// `min_bar_px` floor: bars smaller than the floor are zeroed out so a
-/// few off-pixel edge samples don't crop content.
+/// Maps probe edges to source pixels, discarding bars below `min_bar_px`
+/// to avoid cropping isolated dark edge pixels.
 fn scale_to_source(probe: AutocropRect, src: (u32, u32), cfg: &AutocropConfig) -> AutocropRect {
     let (sw, sh) = src;
     let scale = |v: u32, probe_dim: u32, src_dim: u32| -> u32 {
@@ -291,8 +260,7 @@ mod tests {
 
     #[test]
     fn walk_capped_by_max_ratio() {
-        // Solid black frame — walk would scan the whole image, but
-        // max_bar_ratio caps it so the rect can't exceed half the dim.
+        // The ratio cap also applies to fully black frames.
         let w = PROBE_W as usize;
         let h = PROBE_H as usize;
         let f = vec![0u8; w * h];
@@ -305,10 +273,7 @@ mod tests {
 
     #[test]
     fn scale_to_source_applies_floor() {
-        // 1px bar at probe scale, scaled to a 160x120 source = 1px. 1 is
-        // below `min_bar_px=2`, so the floor zeroes it out. This protects
-        // against single-pixel edge artefacts being treated as a real
-        // letterbox.
+        // Isolated dark pixels fall below the minimum bar width.
         let probe_rect = AutocropRect {
             l: 1,
             r: 0,
@@ -321,7 +286,7 @@ mod tests {
 
     #[test]
     fn scale_to_source_maps_proportionally() {
-        // 24/120 of probe height → 24/120 * 1080 = 216px of source.
+        // 24/120 of probe height -> 24/120 * 1080 = 216px of source.
         let probe_rect = AutocropRect {
             l: 0,
             r: 0,

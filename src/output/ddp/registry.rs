@@ -1,9 +1,5 @@
-//! DDP collision registry — actor task owning `HashMap<DdpKey, StreamId>`.
-//!
-//! The invariant: at most one active DDP stream per `(dest_ip, output_id)`.
-//! When a new `start_stream` arrives for an already-taken key, the prior
-//! stream is cancelled (via its `cancel_tx`) before the new reservation
-//! completes.
+//! Serializes DDP reservations with one owner per `(dest_ip, output_id)`.
+//! A replacement signals cancellation before receiving its reservation.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -26,8 +22,7 @@ impl std::fmt::Display for DdpKey {
     }
 }
 
-/// A reservation for a DDP key. Dropping it asks the registry to release
-/// the key (the registry also treats a closed cancel channel as "gone").
+/// Requests release of this reservation on drop.
 pub struct DdpReservation {
     key: DdpKey,
     stream_id: StreamId,
@@ -77,12 +72,8 @@ impl DdpRegistry {
         Self { tx }
     }
 
-    /// Reserve a DDP key for the given stream. If another stream owns the key,
-    /// it is cancelled before this reservation is granted.
-    ///
-    /// Returns `(reservation, cancel_rx)`. The stream task watches `cancel_rx`
-    /// alongside its frame loop — it fires if a later reservation displaces
-    /// this one.
+    /// Reserves a DDP destination, signaling cancellation to its previous owner first.
+    /// The returned receiver fires when another reservation displaces this stream.
     pub async fn reserve(
         &self,
         key: DdpKey,
@@ -135,7 +126,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RegistryMsg>) {
                 debug!(%key, %stream_id, "DDP reservation granted");
             }
             RegistryMsg::Release { key, stream_id } => {
-                // Only release if the stream_id still matches — a displaced
+                // Only release if the stream_id still matches; a displaced
                 // stream may send Release after a new one has taken over.
                 if matches!(occupied.get(&key), Some((sid, _)) if *sid == stream_id) {
                     occupied.remove(&key);
@@ -176,7 +167,6 @@ mod tests {
 
         let _res2 = reg.reserve(k, id2).await.unwrap();
 
-        // The first reservation's cancel channel should fire.
         cancel_rx.await.unwrap();
     }
 

@@ -1,4 +1,4 @@
-//! Static + animated image pipeline.
+//! Static and animated image processing.
 
 pub mod animated;
 pub mod decode;

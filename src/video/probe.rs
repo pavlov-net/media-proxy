@@ -1,11 +1,5 @@
-//! ffprobe pre-pass: extract source width/height/SAR/rotation/fps so the
-//! filter graph can do source-aware decisions (Auto-fit direct-scale,
-//! transpose for rotated content) before the main ffmpeg spawn.
-//!
-//! All failures are non-fatal — on probe error or timeout, callers fall
-//! back to the target-only graph (Pad fit, no rotation handling). This
-//! matters most for live sources (RTSP, MJPEG) where ffprobe can hang or
-//! return nothing useful: graceful degradation beats blocking forever.
+//! Extracts dimensions, sample aspect ratio, and rotation for video filters.
+//! Probe failures return no metadata so playback can proceed with target-only fitting.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -18,36 +12,27 @@ use tracing::{debug, warn};
 use crate::stream::url::is_http_url;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Reused for ffprobe's `-rw_timeout` (microseconds) so a stalled socket
-/// doesn't outlive `PROBE_TIMEOUT`. Slightly tighter than `PROBE_TIMEOUT`
-/// to give ffprobe a chance to fail gracefully before tokio aborts it.
+/// HTTP read timeout, shorter than the outer probe deadline.
 const HTTP_RW_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoProbeData {
-    /// Coded source dimensions, before container rotation is applied.
-    /// For display-orientation dims (what a player would render), use
-    /// [`VideoProbeData::display_dims`].
+    /// Coded width before rotation; see [`Self::display_dims`] for display orientation.
     pub width: u32,
     pub height: u32,
     pub sar_num: u32,
     pub sar_den: u32,
-    /// Container rotation, normalised by [`normalise_rotation`] to one of
-    /// `{0, 90, 180, 270}`. `parse_ffprobe` is the only construction site
-    /// that produces `VideoProbeData`, so the invariant holds for all
-    /// values that reach external callers.
+    /// Clockwise rotation in degrees, rounded to a quarter-turn by the parser.
     pub rotation_deg: u32,
 }
 
 impl VideoProbeData {
-    /// Coded `(width, height)` — pre-rotation, as ffprobe reported.
+    /// Returns coded dimensions before rotation.
     pub fn dims(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// Display `(width, height)` — coded dims swapped for 90°/270°
-    /// container rotations, since ffmpeg auto-rotates at decode time and
-    /// the filter graph reasons in display orientation.
+    /// Returns dimensions after rotation, matching ffmpeg's decoded orientation.
     pub fn display_dims(&self) -> (u32, u32) {
         if matches!(self.rotation_deg, 90 | 270) {
             (self.height, self.width)
@@ -57,9 +42,7 @@ impl VideoProbeData {
     }
 }
 
-/// Run ffprobe with a hard timeout. Returns `None` on any failure
-/// (binary missing, timeout, JSON parse, no video stream). Callers must
-/// be prepared to continue without source-side metadata.
+/// Returns metadata, or `None` on timeout, process failure, or unusable output.
 pub async fn probe_video_metadata(url: &str, headers: Option<&str>) -> Option<VideoProbeData> {
     let raw = match time::timeout(PROBE_TIMEOUT, run_ffprobe(Command::new("ffprobe"), url, headers)).await {
         Ok(Ok(s)) => s,
@@ -157,8 +140,7 @@ fn parse_ffprobe(raw: &str) -> Option<VideoProbeData> {
     })
 }
 
-/// `"10:11"` → `(10, 11)`. `"0:1"` and unparseable values become `(1, 1)`,
-/// matching ffmpeg's "unknown SAR → assume square pixels" convention.
+/// Parses sample aspect ratio; missing, invalid, or zero values mean square pixels.
 fn parse_sar(s: Option<&str>) -> (u32, u32) {
     let Some(s) = s else { return (1, 1) };
     let Some((n, d)) = s.split_once(':') else {
@@ -169,9 +151,7 @@ fn parse_sar(s: Option<&str>) -> (u32, u32) {
     if n == 0 || d == 0 { (1, 1) } else { (n, d) }
 }
 
-/// Rotation source priority: side_data_list[].rotation (newer
-/// container metadata, signed degrees) wins over the legacy `rotate`
-/// stream tag (positive degrees as a string).
+/// Prefers display-matrix rotation over the string-valued `rotate` tag.
 fn extract_rotation(s: &FfprobeStream) -> f64 {
     if let Some(side) = s.side_data_list.iter().find_map(|sd| sd.rotation) {
         return side;
@@ -183,10 +163,7 @@ fn extract_rotation(s: &FfprobeStream) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Coerce arbitrary rotation values into one of {0, 90, 180, 270}.
-/// Negative values come from displaymatrix side data
-/// (e.g. -90 means 90° counter-clockwise = 270° clockwise). The filter
-/// graph emits transposes in clockwise terms, so we normalise here.
+/// Rounds rotation to a clockwise quarter-turn, accepting negative degrees.
 fn normalise_rotation(deg: f64) -> u32 {
     let n = ((deg.round() as i64).rem_euclid(360)) as u32;
     match n {
@@ -297,7 +274,7 @@ mod tests {
 
     #[test]
     fn rotation_from_side_data_negative() {
-        // Display matrix encodes -90 ≡ 270° clockwise.
+        // Display matrix encodes -90 = 270 degrees clockwise.
         let raw = r#"{"streams":[{"width":100,"height":100,"side_data_list":[{"rotation":-90.0}]}]}"#;
         let d = parse_ffprobe(raw).unwrap();
         assert_eq!(d.rotation_deg, 270);
@@ -352,9 +329,6 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// End-to-end: spawn ffprobe against a known synthetic source and
-    /// verify the parse + classification pipeline produces sensible
-    /// numbers. Pins the JSON shape against the actual ffprobe binary.
     #[tokio::test]
     #[allow(clippy::print_stderr)]
     async fn probe_lavfi_testsrc_returns_dims() {
@@ -362,12 +336,7 @@ mod tests {
             eprintln!("ffprobe not on PATH; skipping probe_lavfi_testsrc_returns_dims");
             return;
         }
-        // We can't pass `-f lavfi` through `probe_video_metadata` (it
-        // builds the args itself), so verify the full pipeline by
-        // running ffprobe directly against a tiny generated input. The
-        // shared parser is what we're really pinning here; the binary
-        // call is just to keep the JSON shape honest against the
-        // installed ffprobe version.
+        // The synthetic input needs lavfi options outside the production probe interface.
         let out = Command::new("ffprobe")
             .args([
                 "-hide_banner",

@@ -1,7 +1,5 @@
-//! Real HTTP resolver — POSTs to an external resolver sidecar.
-//!
-//! Wrap with [`super::PassthroughLayer`] for direct-media short-circuiting;
-//! this impl assumes every URL it sees needs full extraction.
+//! Posts resolution requests to an external service. [`super::PassthroughLayer`]
+//! bypasses this service for recognized direct media.
 
 use std::time::Duration;
 

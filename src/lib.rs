@@ -1,5 +1,4 @@
-// Pedantic / nursery stay opt-in per-module (see rust.md §Pre-commit).
-// The CI gate uses `-D warnings` so those groups must not fire by default.
+//! Media decoding and WebSocket-controlled DDP streaming.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod api;

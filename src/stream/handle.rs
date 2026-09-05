@@ -1,5 +1,4 @@
-//! `StreamHandle` — the orchestrator returns this when a stream is spawned;
-//! the session owns it and calls `cancel()` on stop / disconnect.
+//! Session-owned stream parameters and cancellation notifications.
 
 use std::sync::Arc;
 
@@ -28,18 +27,17 @@ impl StreamHandle {
         self.stream_id
     }
 
-    /// The resolved fields the stream was spawned with. `update` uses these
-    /// as the base for merging partial updates.
+    /// Returns the original resolved parameters used as the base for partial updates.
     pub fn fields(&self) -> &StreamFields {
         &self.fields
     }
 
-    /// Signal the stream task to stop. Idempotent.
+    /// Notifies current cancellation waiters.
     pub fn cancel(&self) {
         self.cancel.notify_waiters();
     }
 
-    /// Wait for cancellation. Stream task's async select arm.
+    /// Waits for the next cancellation notification.
     pub async fn cancelled(&self) {
         self.cancel.notified().await;
     }

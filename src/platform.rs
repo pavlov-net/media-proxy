@@ -1,4 +1,4 @@
-//! OS-specific hooks. Currently just Windows timer resolution.
+//! Windows timer resolution and platform-specific hardware backend selection.
 
 #[cfg(windows)]
 pub struct WindowsTimerResolution {
@@ -7,8 +7,7 @@ pub struct WindowsTimerResolution {
 
 #[cfg(windows)]
 impl WindowsTimerResolution {
-    /// Calls `timeBeginPeriod(1)` on construction, `timeEndPeriod(1)` on drop.
-    /// No-ops when `enable` is false.
+    /// Requests millisecond timer resolution until drop when enabled.
     pub fn new(enable: bool) -> Self {
         if enable {
             // SAFETY: `timeBeginPeriod` is a stable Win32 API; `1` is a valid period.
@@ -42,10 +41,8 @@ impl WindowsTimerResolution {
     }
 }
 
-/// Pick the best hardware-accel backend given a preference + `ffmpeg -hwaccels` output.
-///
-/// `prefer` is one of `"auto"`, `"none"`, or a specific backend name. When `"auto"`,
-/// walks a platform-specific candidate list. Returns `None` if nothing matches.
+/// Selects an available backend in platform order for Auto, or matches a
+/// named preference. None or an unavailable preference selects CPU decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HwBackend {
     Cuda,
@@ -78,7 +75,7 @@ impl HwBackend {
     }
 }
 
-/// Platform-appropriate candidate order when `prefer == "auto"`.
+/// Returns backend preference order for Auto selection.
 pub fn auto_candidates() -> &'static [HwBackend] {
     #[cfg(target_os = "windows")]
     {
@@ -110,11 +107,10 @@ mod tests {
     fn pick_auto_returns_first_available() {
         let avail = [HwBackend::Qsv, HwBackend::Vaapi];
         let picked = pick_hw_backend("auto", &avail);
-        // On Linux, auto tries vaapi first.
         #[cfg(all(unix, not(target_os = "macos")))]
         assert_eq!(picked, Some(HwBackend::Vaapi));
         #[cfg(target_os = "windows")]
-        assert_eq!(picked, Some(HwBackend::Qsv)); // cuda/d3d11 missing → qsv
+        assert_eq!(picked, Some(HwBackend::Qsv)); // CUDA and D3D11 are unavailable.
         #[cfg(target_os = "macos")]
         assert_eq!(picked, None); // videotoolbox missing
     }

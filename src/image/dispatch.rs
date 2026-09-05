@@ -1,8 +1,4 @@
-//! Image source dispatch: fetch → sniff animated-vs-static → build `FrameSource`.
-//!
-//! The orchestrator hands this module the resolved `StreamFields`; we own
-//! fetching, format detection, decoding, compositing, and cache population
-//! so the orchestrator's `build_source` stays a three-way router.
+//! Fetches images, selects static or animated decoding, and builds a frame source.
 
 use crate::Config;
 use crate::control::fields::StreamFields;
@@ -44,7 +40,7 @@ pub async fn build_image_source(
             source_url: &fields.source,
             r#loop: fields.r#loop,
         };
-        // CPU-bound inline — swap to `spawn_blocking` if runtime starvation shows up.
+        // Decoding runs inline on the async task.
         let seq = animated::dispatch(bytes, &params, frame_cache).map_err(StreamError::Image)?;
         return Ok(FrameSource::Animated(AnimatedSource {
             frames: seq,

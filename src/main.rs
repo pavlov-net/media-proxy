@@ -5,7 +5,7 @@ use media_proxy::{Config, Result, api, telemetry};
 use tracing::{info, warn};
 
 #[derive(Debug, Parser)]
-#[command(name = "media-proxy", version, about = "Media proxy → DDP for LED displays")]
+#[command(name = "media-proxy", version, about = "Streams media to displays over DDP")]
 struct Cli {
     #[arg(long, default_value = "0.0.0.0")]
     host: IpAddr,
@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve when the process receives SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+/// Waits for SIGINT or, on Unix, SIGTERM.
 async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(e) = tokio::signal::ctrl_c().await {

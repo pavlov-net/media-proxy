@@ -1,15 +1,5 @@
-//! Build the `-vf` filter graph string. Pure function, table-driven tests.
-//!
-//! Filter order matters: ffmpeg applies filters left-to-right and later
-//! filters depend on upstream normalization (square pixels, post-rotation
-//! orientation, range expansion baked into the downscale).
-//!
-//! Layout:
-//! ```text
-//! [crop_autocrop?] → scale iw*sar:ih → setsar=1 → transpose×N (rotation)
-//!     → scale target (+ expand range) → pad|crop (fit mode) → setdar=1
-//!     → format=rgb24
-//! ```
+//! Builds ffmpeg filters in dependency order: autocrop, square-pixel conversion,
+//! rotation, target scaling with range expansion, fitting, and RGB24 conversion.
 
 use std::fmt::Write;
 
@@ -23,9 +13,7 @@ pub struct AutocropRect {
 }
 
 pub struct FilterGraphParams {
-    /// Source dimensions (post-rotation), when known via a probe pass.
-    /// When `None`, Auto-fit conservatively falls through to Pad — the
-    /// smart direct-scale path needs source ratios to compare.
+    /// Source dimensions after rotation. `None` makes Auto fit use padding.
     pub src_dims: Option<(u32, u32)>,
     pub sar_num: u32,
     pub sar_den: u32,
@@ -33,30 +21,25 @@ pub struct FilterGraphParams {
     pub target_width: u32,
     pub target_height: u32,
     pub fit: Fit,
-    pub expand: u8, // 0=never, 1=auto, 2=force (tv→pc)
+    pub expand: u8, // 0=ffmpeg defaults, 1=auto input to full, 2=limited input to full
     pub autocrop: Option<AutocropRect>,
 }
 
-/// Build the `-vf` filter chain as a single string.
-///
-/// The output is wired into `ffmpeg -vf <this>` — comma-separated filter
-/// entries — not the lower-level `filter_complex` graph syntax.
+/// Returns a comma-separated filter chain for ffmpeg `-vf`.
 pub fn build_filter_graph(p: &FilterGraphParams) -> String {
     let mut s = String::new();
 
-    // Autocrop first, in source pixel coordinates. Without a source-dims
-    // probe we can't compute the crop rect — the dispatcher leaves
-    // `autocrop: None` in that case.
+    // Crop edges use source pixels, before SAR correction and target scaling.
     if let (Some(ac), Some((src_w, src_h))) = (&p.autocrop, p.src_dims) {
         let cw = src_w.saturating_sub(ac.l + ac.r).max(1);
         let ch = src_h.saturating_sub(ac.t + ac.b).max(1);
         let _ = write!(s, "crop={cw}:{ch}:{}:{},", ac.l, ac.t);
     }
 
-    // Unsqueeze PAR, then force SAR=1 so downstream scale works on square pixels.
+    // Normalize sample aspect ratio before target scaling.
     s.push_str("scale=iw*sar:ih,setsar=1,");
 
-    // Rotation via transpose. 180° is two `transpose=clock` chained.
+    // Two clockwise transposes produce a half-turn.
     match p.rotation_deg {
         90 => s.push_str("transpose=clock,"),
         180 => s.push_str("transpose=clock,transpose=clock,"),
@@ -64,7 +47,7 @@ pub fn build_filter_graph(p: &FilterGraphParams) -> String {
         _ => {}
     }
 
-    // Range-expand args live in the scale that performs the downscale to target.
+    // Apply range expansion during target scaling.
     let expand_args: &str = match p.expand {
         2 => ":in_range=tv:out_range=pc",
         1 => ":in_range=auto:out_range=pc",
@@ -85,8 +68,7 @@ pub fn build_filter_graph(p: &FilterGraphParams) -> String {
             );
         }
         Fit::Auto => {
-            // Scale direct if aspect ratios match; without source dims we
-            // can't compare ratios, so fall through to Pad conservatively.
+            // Unknown source dimensions prevent aspect-ratio comparison; use padding.
             let direct = p.src_dims.is_some_and(|(sw, sh)| {
                 let src_ratio = (sw as f64 * p.sar_num as f64) / (sh as f64 * p.sar_den.max(1) as f64);
                 let tgt_ratio = p.target_width as f64 / p.target_height.max(1) as f64;
@@ -156,7 +138,6 @@ mod tests {
 
     #[test]
     fn auto_with_matching_ratio_is_direct_scale() {
-        // 1:1 source → 64x64 target → ratios match → direct scale (no pad).
         let mut p = basic(Fit::Auto);
         p.src_dims = Some((1000, 1000));
         let s = build_filter_graph(&p);

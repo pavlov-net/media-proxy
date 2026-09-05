@@ -1,5 +1,4 @@
-//! Orchestrator: spawn per-stream tasks, own the DDP registry, hand back
-//! `StreamHandle`s for session-level cancellation.
+//! Owns stream tasks and DDP reservations; sessions control them through handles.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,14 +18,10 @@ use crate::resolver::Resolver;
 use crate::stream::handle::StreamHandle;
 use crate::stream::runner;
 
-/// Upper bound on retry attempts for transient errors (network failure,
-/// YouTube URL expiry, retryable decode faults).
+/// Retry budget for transient source and playback failures.
 const MAX_RETRIES: u32 = 3;
 
-/// Stop relooping after this many consecutive iterations produce zero frames.
-/// Catches the case where the source has gone permanently bad (e.g. a video
-/// URL now 403s — ffmpeg exits silently with no frames, the runner returns
-/// `Ok`, and the outer loop would otherwise spin forever).
+/// Bounds empty playback loops so a broken source cannot restart indefinitely.
 const MAX_EMPTY_LOOPS: u32 = 3;
 
 pub struct Orchestrator {
@@ -47,9 +42,8 @@ impl Orchestrator {
         }
     }
 
-    /// Spawn a stream task for `fields`. Returns a handle the caller uses
-    /// to cancel it. On cancellation or error, the task cleans itself up
-    /// via `Drop` semantics (reservation, sink, ffmpeg child).
+    /// Starts playback and returns a cancellation handle. Task exit releases
+    /// the DDP reservation, sink, and owned media processes.
     pub async fn spawn_stream(self: &Arc<Self>, fields: StreamFields) -> Result<StreamHandle, StreamError> {
         let stream_id = StreamId::new();
         let handle = StreamHandle::new(stream_id, fields.clone());
@@ -80,8 +74,7 @@ impl Orchestrator {
     }
 }
 
-/// Execute one stream lifecycle. The task exits on cancellation, when the
-/// source ends (non-looping), or on error.
+/// Runs until cancellation, failure, or non-looping source completion.
 async fn run_stream(
     fields: StreamFields,
     stream_id: StreamId,
@@ -91,7 +84,7 @@ async fn run_stream(
     frame_cache: FrameCache,
     resolver: Arc<dyn Resolver>,
 ) -> Result<(), StreamError> {
-    // Reserve DDP address — this displaces any previous stream on the same key.
+    // A destination/output pair can have only one active stream.
     let key = DdpKey {
         dest: fields.ddp_host,
         output_id: crate::control::fields::output_id_byte(fields.output_id),
@@ -101,7 +94,6 @@ async fn run_stream(
         .await
         .map_err(StreamError::Output)?;
 
-    // Build DDP sender.
     let sender: Arc<dyn OutputSink> = Arc::new(
         DdpSender::bind(
             fields.ddp_host,
@@ -126,9 +118,7 @@ async fn run_stream(
     Ok(())
 }
 
-/// Build the source and run it, retrying on transient errors with
-/// exponential backoff (0.5 → 1 → 2 s, ±50 ms jitter). Matches the
-/// YouTube-URL-expiry and network-blip recovery path.
+/// Runs playback with bounded exponential retries for transient failures.
 async fn run_with_retry(
     fields: &StreamFields,
     config: &Config,
@@ -136,9 +126,7 @@ async fn run_with_retry(
     resolver: &Arc<dyn Resolver>,
     sink: &dyn OutputSink,
 ) -> Result<(), StreamError> {
-    // Probe once per stream — Content-Type / magic bytes don't change for
-    // the lifetime of the source, so retries and loop iterations reuse the
-    // result instead of re-issuing HEAD requests.
+    // Reuse source classification across retries and playback loops.
     let kind = crate::stream::probe::probe(&fields.source, &config.net.user_agent).await;
     let mut attempt: u32 = 0;
     let mut empty_loops: u32 = 0;
@@ -164,12 +152,8 @@ async fn run_with_retry(
         match outcome {
             Ok(emitted) => {
                 if emitted == 0 {
-                    // Source built cleanly but produced no frames — most
-                    // commonly an ffmpeg subprocess that exited because the
-                    // upstream URL returned 4xx/5xx. Non-loop: surface as an
-                    // error instead of silently reporting "stream finished".
-                    // Loop: give up after a few consecutive empties so a
-                    // permanently-broken source doesn't spin forever.
+                    // Zero frames is a failure for one-shot playback. Looping sources get
+                    // a bounded number of empty attempts before failure.
                     empty_loops += 1;
                     if !fields.r#loop || empty_loops >= MAX_EMPTY_LOOPS {
                         return Err(StreamError::Media(MediaError::Network {
@@ -193,7 +177,7 @@ async fn run_with_retry(
                 }
                 empty_loops = 0;
 
-                // Non-cached video can only loop by rebuilding from scratch.
+                // Video sources that cannot rewind restart through source construction.
                 if fields.r#loop {
                     attempt = 0;
                     continue;
@@ -223,7 +207,6 @@ fn is_retryable(e: &StreamError) -> bool {
 }
 
 fn backoff(attempt: u32) -> Duration {
-    // 0.5s * 2^n, capped at 5s, plus 0..50ms jitter.
     let base_ms = 500u64.saturating_mul(1 << attempt).min(5000);
     let jitter_ms = rand::rng().random_range(0..50);
     Duration::from_millis(base_ms + jitter_ms)

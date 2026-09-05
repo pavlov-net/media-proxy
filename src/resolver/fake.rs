@@ -1,5 +1,4 @@
-//! Fake resolver for integration tests: canned responses for registered
-//! URLs, optional passthrough for the rest.
+//! Registered resolver responses for tests, with optional passthrough for unknown URLs.
 
 use std::collections::HashMap;
 
@@ -11,7 +10,7 @@ use crate::error::ResolverError;
 #[derive(Default)]
 pub struct FakeResolver {
     map: HashMap<String, ResolveResponse>,
-    /// When set, returned for any URL not in `map`.
+    /// Allows unregistered URLs to pass through unchanged.
     passthrough: bool,
 }
 

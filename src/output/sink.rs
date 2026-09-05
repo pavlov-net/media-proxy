@@ -1,4 +1,4 @@
-//! `OutputSink` trait + shared types.
+//! Frame sink interface and shared output types.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,15 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::OutputError;
 
-/// Opaque stream identity, assigned by the orchestrator. Separate from any
-/// protocol-level addressing (DDP tuples, URLs, etc.) so the orchestrator
-/// doesn't have to know what identifies a stream to the wire.
+/// Internal stream identity, independent of sink-specific destination addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StreamId(u64);
 
 impl StreamId {
     pub fn new() -> Self {
-        // Monotonic counter, safe against wrap-around for our cardinalities.
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
@@ -45,8 +42,7 @@ pub enum PixelFormat {
 impl PixelFormat {
     pub fn from_str_canon(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            // Python sent RGB888 for the ddp-esphome rgbw option; the
-            // receiver converts RGB input for its RGBW light renderer.
+            // ddp-esphome converts RGB input for its RGBW renderer.
             "rgb888" | "rgbw" => Some(Self::Rgb888),
             "rgb565le" => Some(Self::Rgb565Le),
             "rgb565be" => Some(Self::Rgb565Be),
@@ -72,13 +68,11 @@ pub struct Frame {
     pub meta: FrameMeta,
 }
 
-/// An `OutputSink` represents a single stream in flight: the reservation
-/// (conflict + address binding) is already held, and `send_frame` pushes
-/// rendered frames out to the wire.
+/// Frame destination for a stream whose address reservation is already held.
 #[async_trait::async_trait]
 pub trait OutputSink: Send + Sync {
     async fn send_frame(&self, frame: Frame) -> Result<(), OutputError>;
 
-    /// Request an orderly shutdown (drain any buffered frames then close).
+    /// Requests sink cleanup. Transport ownership controls socket lifetime.
     async fn close(&self) -> Result<(), OutputError>;
 }

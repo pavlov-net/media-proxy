@@ -1,4 +1,4 @@
-//! Color parsing — named CSS colors + hex shorthand/full.
+//! Named CSS colors and short or full hexadecimal color parsing.
 
 pub fn parse(s: &str) -> Option<[u8; 3]> {
     let lower = s.to_ascii_lowercase();
@@ -24,9 +24,7 @@ pub fn parse(s: &str) -> Option<[u8; 3]> {
 }
 
 pub fn named(name: &str) -> Option<[u8; 3]> {
-    // CSS3 named colors — subset that covers BBCode shorthand tags
-    // (`[purple]`, `[teal]`, `[pink]`, …) and URL specs. Alphabetized by
-    // word except for shared aliases (aqua/cyan, fuchsia/magenta).
+    // Named colors support BBCode shorthand tags and placeholder URL colors.
     match name {
         "aliceblue" => Some([240, 248, 255]),
         "aqua" | "cyan" => Some([0, 255, 255]),
@@ -82,8 +80,7 @@ pub fn named(name: &str) -> Option<[u8; 3]> {
     }
 }
 
-/// Pick black or white to contrast with `bg` using the WCAG relative
-/// luminance formula.
+/// Selects black or white from weighted sRGB brightness.
 pub fn auto_contrast(bg: [u8; 3]) -> [u8; 3] {
     let r = f32::from(bg[0]) / 255.0;
     let g = f32::from(bg[1]) / 255.0;

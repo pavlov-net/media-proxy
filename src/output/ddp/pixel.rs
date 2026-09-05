@@ -1,8 +1,4 @@
-//! RGB888 → RGB565 quantization (scalar + SIMD paths, identical output).
-//!
-//! Per-channel rounding follows `(c / 255) * N + 0.5`, truncated — equivalent
-//! to numpy's `(c / 255 * N + 0.5).astype(u16)`. Implemented with integer
-//! math so SIMD and scalar paths produce bit-identical output.
+//! RGB888 to RGB565 quantization with integer per-channel rounding.
 
 use crate::output::sink::PixelFormat;
 
@@ -20,8 +16,7 @@ pub fn endian_for(format: PixelFormat) -> Option<Endian> {
     }
 }
 
-/// LUT giving `r5 << 11` for each input byte. Computed at compile time from
-/// the same `(c * 31 * 2 + 255) / 510` rounding the scalar code used.
+/// Precomputed red-channel rounding and placement in RGB565.
 static LUT_R5_SHIFTED: [u16; 256] = build_r5_lut();
 static LUT_G6_SHIFTED: [u16; 256] = build_g6_lut();
 static LUT_B5: [u16; 256] = build_b5_lut();
@@ -56,12 +51,8 @@ const fn build_b5_lut() -> [u16; 256] {
     lut
 }
 
-/// RGB888 → RGB565. Input must be RGB-triplets (length multiple of 3). Any
-/// ragged tail is dropped. Returns `(len/3)*2` bytes in the chosen endianness.
-///
-/// Three 256-entry LUTs replace the per-pixel multiply/divide; the LUT path is
-/// bit-identical to the scalar `(c * N * 2 + 255) / 510` rounding the original
-/// implementation used.
+/// Converts RGB triplets to RGB565, dropping any incomplete trailing pixel.
+/// Returns `(len / 3) * 2` bytes in the requested byte order.
 pub fn rgb888_to_565(input: &[u8], endian: Endian) -> Vec<u8> {
     let n = input.len() / 3;
     let mut out = vec![0u8; n * 2];
@@ -89,11 +80,8 @@ fn convert_to(input: &[u8], out: &mut [u8], to_bytes: fn(u16) -> [u8; 2]) {
     }
 }
 
-/// Convert a frame to the requested pixel format.
-///
-/// For `Rgb888`, the input is borrowed unchanged (no copy). For the 565
-/// variants, the payload is quantized and re-packed in the requested
-/// endianness.
+/// Converts a frame to the requested format, borrowing RGB888 unchanged
+/// and allocating packed bytes for RGB565.
 pub fn encode_frame<'a>(input: &'a [u8], format: PixelFormat) -> std::borrow::Cow<'a, [u8]> {
     use std::borrow::Cow;
     match format {

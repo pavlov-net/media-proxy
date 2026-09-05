@@ -1,15 +1,5 @@
-//! `ddp-view` — terminal DDP receiver for end-to-end testing.
-//!
-//! Listens on a UDP port for DDP packets, assembles frames per `out_id`, and
-//! renders them in the terminal using upper-half-block characters (one
-//! terminal row = two LED rows, so a 64×64 frame fits in 64×32 cells).
-//!
-//! Optionally connects to a running `media-proxy` over WebSocket and sends a
-//! `start_stream` so the proxy targets *this* viewer:
-//!
-//! ```text
-//! ddp-view --connect ws://localhost:8788/control --src /tmp/test.png
-//! ```
+//! Terminal DDP receiver and optional WebSocket client. Frames use upper-half
+//! block glyphs, displaying two pixel rows per terminal row.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
@@ -34,7 +24,7 @@ const PIXEL_RGB888: u8 = 0x0B;
 const PIXEL_RGB565_BE: u8 = 0x61;
 const PIXEL_RGB565_LE: u8 = 0x62;
 
-/// Cap render rate so high-fps streams don't thrash the terminal.
+/// Limits rendering frequency to avoid terminal saturation.
 const RENDER_INTERVAL: Duration = Duration::from_millis(33); // ~30 fps
 
 #[derive(Debug, Parser)]
@@ -48,20 +38,19 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0")]
     listen_host: IpAddr,
 
-    /// Display width (pixels). Must match the source you're receiving.
+    /// Frame width in pixels; must match the received stream.
     #[arg(long, default_value_t = 64)]
     width: u32,
 
-    /// Display height (pixels). Must match the source you're receiving.
+    /// Frame height in pixels; must match the received stream.
     #[arg(long, default_value_t = 64)]
     height: u32,
 
-    /// Filter rendering to a single `out_id`. Default: 1.
+    /// Output ID to render.
     #[arg(long, default_value_t = 1)]
     out: u8,
 
-    /// Connect to a media-proxy WebSocket and drive a stream into this viewer.
-    /// Example: `ws://localhost:8788/control`
+    /// WebSocket URL for controlling a media-proxy stream into this viewer.
     #[arg(long)]
     connect: Option<String>,
 
@@ -69,9 +58,7 @@ struct Cli {
     #[arg(long, requires = "connect")]
     src: Option<String>,
 
-    /// Override `ddp_host` in the start_stream request. Defaults to
-    /// letting media-proxy use the WebSocket client IP (loopback when
-    /// run on the same host).
+    /// Destination IP override; otherwise media-proxy uses the WebSocket client IP.
     #[arg(long, requires = "connect")]
     ddp_host: Option<String>,
 
@@ -83,7 +70,7 @@ struct Cli {
     #[arg(long, default_value = "rgb888", requires = "connect")]
     fmt: String,
 
-    /// Disable looping for the controlled stream (default: loop).
+    /// Plays the controlled stream once.
     #[arg(long, requires = "connect")]
     no_loop: bool,
 }
@@ -98,7 +85,6 @@ async fn main() -> anyhow::Result<()> {
         cli.listen_host, cli.listen_port, cli.out, cli.width, cli.height
     );
 
-    // Optional: open WS, send hello + start_stream, watch for errors.
     let ws_task = if let Some(url) = cli.connect.clone() {
         let src = cli
             .src
@@ -123,7 +109,6 @@ async fn main() -> anyhow::Result<()> {
 
     let frames: Arc<Mutex<HashMap<u8, FrameBuf>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Receive loop with graceful Ctrl-C.
     let recv_loop = receive_and_render(sock, frames.clone(), cli.out, cli.width, cli.height);
     tokio::select! {
         r = recv_loop => r?,
@@ -132,12 +117,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Tell media-proxy to stop our stream and let the WS task drain.
     if let Some(handle) = ws_task {
         handle.abort();
     }
 
-    // Restore terminal: reset attrs, show cursor, clear, home.
+    // Restore terminal state on exit.
     print!("\x1b[0m\x1b[?25h\x1b[2J\x1b[H");
     let _ = std::io::stdout().flush();
     Ok(())
@@ -145,9 +129,9 @@ async fn main() -> anyhow::Result<()> {
 
 struct FrameBuf {
     pixel_cfg: u8,
-    /// Frame buffer sized to whatever pixel format the sender is using.
+    /// Payload storage in the sender's pixel format.
     data: Vec<u8>,
-    /// Last time we re-rendered. Used to throttle.
+    /// Rendering timestamp for rate limiting.
     last_render: Instant,
 }
 
@@ -179,7 +163,7 @@ async fn receive_and_render(
             continue;
         }
         let flags = buf[0];
-        // bytes 1=seq is informational, ignore for now
+        // Packet sequence is informational; assembly uses byte offsets.
         let pixel_cfg = buf[2];
         let out_id = buf[3];
         let offset = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
@@ -203,7 +187,6 @@ async fn receive_and_render(
             }
         };
 
-        // Stash payload at offset, growing/resetting if format/size changed.
         let render_now = {
             let mut map = frames.lock();
             let fb = map
@@ -230,9 +213,7 @@ async fn receive_and_render(
                 (fb.pixel_cfg, fb.data.clone())
             };
             let rgb = decode_to_rgb888(&snapshot.1, snapshot.0);
-            // Full clear only on first frame or dimension change. Otherwise
-            // we just rewrite over the existing characters — same width,
-            // same positions, no flash.
+            // Clear on first render or dimension changes; overwrite otherwise to avoid flicker.
             let clear = last_drawn_dims != Some((w, h));
             render(&rgb, w, h, out_id, frames_drawn, bytes_seen, clear);
             last_drawn_dims = Some((w, h));
@@ -261,8 +242,7 @@ fn decode_565(data: &[u8], be: bool) -> Vec<u8> {
         let r5 = (v >> 11) & 0x1F;
         let g6 = (v >> 5) & 0x3F;
         let b5 = v & 0x1F;
-        // Expand 5/6-bit → 8-bit by replicating high bits into the low ones
-        // (matches the standard "color space expansion" used by panel firmware).
+        // Replicate high bits into low bits when expanding RGB565 channels.
         let r = ((r5 << 3) | (r5 >> 2)) as u8;
         let g = ((g6 << 2) | (g6 >> 4)) as u8;
         let b = ((b5 << 3) | (b5 >> 2)) as u8;
@@ -274,12 +254,9 @@ fn decode_565(data: &[u8], be: bool) -> Vec<u8> {
 fn render(rgb: &[u8], w: u32, h: u32, out_id: u8, frames_drawn: u64, bytes_seen: u64, clear: bool) {
     let mut stdout = std::io::stdout().lock();
     if clear {
-        // First render — clear the screen, hide cursor, park at top-left.
         let _ = write!(stdout, "\x1b[2J\x1b[?25l\x1b[H");
     } else {
-        // Subsequent renders — just home the cursor and overwrite. Each
-        // line ends with `\x1b[K` (erase to end of line) so a shrinking
-        // status string doesn't leave digits dangling.
+        // Overwrite in place and erase line endings so shorter status text leaves no residue.
         let _ = write!(stdout, "\x1b[H");
     }
     let _ = writeln!(
@@ -303,11 +280,9 @@ fn render(rgb: &[u8], w: u32, h: u32, out_id: u8, frames_drawn: u64, bytes_seen:
         for x in 0..w {
             let [tr, tg, tb] = pixel(x, y);
             let [br, bg, bb] = pixel(x, y + 1);
-            // Foreground = top half-pixel, background = bottom half-pixel,
-            // glyph = upper half block. Renders square pixels in normal-aspect terminal cells.
+            // Each block glyph combines a foreground upper pixel and background lower pixel.
             let _ = write!(stdout, "\x1b[38;2;{tr};{tg};{tb};48;2;{br};{bg};{bb}m\u{2580}");
         }
-        // Reset attributes + erase any leftovers from a previously-wider frame.
         let _ = writeln!(stdout, "\x1b[0m\x1b[K");
     }
     let _ = stdout.flush();
@@ -334,8 +309,7 @@ async fn run_ws_controller(req: StartStreamReq) -> anyhow::Result<()> {
     let hello = json!({"type": "hello", "device_id": "ddp-view"}).to_string();
     ws.send(Message::Text(hello.into())).await?;
 
-    // start_stream — include only fields the user actually set so server-side
-    // defaults still apply where appropriate.
+    // Omitted optional fields retain the server's defaults.
     let mut start = serde_json::Map::new();
     start.insert("type".into(), json!("start_stream"));
     start.insert("out".into(), json!(req.out));
@@ -352,9 +326,7 @@ async fn run_ws_controller(req: StartStreamReq) -> anyhow::Result<()> {
     let payload = serde_json::Value::Object(start).to_string();
     ws.send(Message::Text(payload.into())).await?;
 
-    // The server PINGs every 15 s; tungstenite handles the PONG reply
-    // automatically. We just need to keep the recv loop draining so we
-    // notice ack/error messages and so PONGs go out promptly.
+    // Reading the socket lets tungstenite send automatic Pong replies.
     while let Some(msg) = ws.next().await {
         match msg {
             Ok(Message::Text(t)) => eprintln!("[ws] {t}"),

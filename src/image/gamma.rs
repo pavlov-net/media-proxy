@@ -1,12 +1,4 @@
-//! sRGB ↔ linear-light LUTs (gamma-aware resize).
-//!
-//! Two LUTs computed once at startup:
-//!
-//! - `SRGB_TO_LINEAR_U16`: 256 → u16, sRGB-encoded u8 → 16-bit linear.
-//! - `LINEAR_TO_SRGB_U8`:  65536 → u8, 16-bit linear → sRGB-encoded u8.
-//!
-//! Both use the piecewise sRGB curve — inputs above 0.04045 go through
-//! `((x + 0.055) / 1.055) ^ 2.4`, below use the linear `x / 12.92` region.
+//! Lazy lookup tables convert between sRGB u8 and linear-light u16 values.
 
 use std::sync::LazyLock;
 
@@ -41,7 +33,7 @@ pub static LINEAR_TO_SRGB_U8: LazyLock<Box<[u8; 65536]>> = LazyLock::new(|| {
     lut
 });
 
-/// Convert a slice of sRGB u8 into linear u16 in-place-ish via LUT.
+/// Writes linear-light values to an output slice of matching length.
 pub fn srgb_to_linear(input: &[u8], output: &mut [u16]) {
     debug_assert_eq!(input.len(), output.len());
     for (i, &x) in input.iter().enumerate() {
@@ -49,7 +41,7 @@ pub fn srgb_to_linear(input: &[u8], output: &mut [u16]) {
     }
 }
 
-/// Convert a slice of linear u16 into sRGB u8 via LUT.
+/// Writes sRGB values to an output slice of matching length.
 pub fn linear_to_srgb(input: &[u16], output: &mut [u8]) {
     debug_assert_eq!(input.len(), output.len());
     for (i, &y) in input.iter().enumerate() {

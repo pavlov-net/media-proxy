@@ -1,12 +1,4 @@
-//! Video pipeline — ffmpeg subprocess via `tokio::process`.
-//!
-//! Split into:
-//! - `filter_graph` — pure function, build the `-vf` chain (table-driven tests).
-//! - `subprocess`   — spawn ffmpeg, pipe RGB24 frames, parse `-vf showinfo` stderr for PTS.
-//! - `timing`       — consecutive-PTS → per-frame display delay.
-//! - `dispatch`     — resolver → ffmpeg spawn → `VideoSource` channel.
-//! - `autocrop`     — short probe for black-bar detection.
-//! - `hwaccel`      — map our `HwBackend` enum to ffmpeg CLI flags.
+//! Video decoding through ffmpeg. [`dispatch`] builds sources for the stream runners.
 
 pub mod autocrop;
 pub mod dispatch;

@@ -1,11 +1,5 @@
-//! Per-frame display-delay calculator from consecutive PTS values.
-//!
-//! - First frame: if `avg_ms` is known (from declared fps) use it; else use
-//!   the caller's default.
-//! - Subsequent frames: `delta = (pts - prev_pts) * 1000`. With `avg_ms`
-//!   known, clamp `delta` to `[0.75 * avg, 1.25 * avg]` to absorb decoder
-//!   jitter. Without it, a non-positive delta gets the default.
-//! - Floor at `MIN_DELAY_MS` so downstream pacing never divides by 0.
+//! Converts consecutive PTS to frame delays, using a declared frame rate or
+//! fallback delay when timestamps are missing. Known frame rates bound jitter.
 
 pub const MIN_DELAY_MS: f32 = 10.0;
 
@@ -30,17 +24,14 @@ impl DelayClock {
         self.frames
     }
 
-    /// Compute the delay to hold the current frame before the next, never
-    /// below [`MIN_DELAY_MS`]. Always returns a valid delay — falls back
-    /// through `avg_ms` and then the `default_ms` the clock was built with.
+    /// Returns the current frame's delay in milliseconds, floored at [`MIN_DELAY_MS`].
+    /// Missing timestamps use the declared frame rate, then the configured fallback.
     pub fn next_delay(&mut self, pts_s: Option<f64>) -> f32 {
         self.frames += 1;
 
         let delta_ms = pts_s.zip(self.prev_pts_s).map(|(p, q)| ((p - q) * 1000.0) as f32);
 
-        // Always advance `prev_pts_s` when we have one, even when the delta
-        // is unusable (backwards PTS, reorders). Otherwise we'd compute the
-        // next delta against a stale anchor and drift indefinitely.
+        // Advance the anchor even on invalid deltas to avoid accumulating timing drift.
         if let Some(p) = pts_s {
             self.prev_pts_s = Some(p);
         }
@@ -79,7 +70,7 @@ mod tests {
     fn pts_jitter_clamped_to_avg_window() {
         let mut c = DelayClock::new(Some(33.33), 50.0);
         c.next_delay(Some(0.0));
-        // Burst: PTS moved 500 ms — must clamp to 1.25 × avg.
+        // Burst: PTS moved 500 ms ; must clamp to 1.25 * avg.
         let d = c.next_delay(Some(0.5));
         assert!(d <= 1.25 * 33.33);
     }
@@ -99,10 +90,6 @@ mod tests {
 
     #[test]
     fn backwards_pts_advances_anchor() {
-        // Consecutive PTS: 0.0, 0.0 (stall), 0.1. After the stall, the
-        // anchor must be the stalled value — not the pre-stall — so the
-        // 0.1 frame's delta is 100ms, not 200ms. This is the regression
-        // for the pre-fix bug where the early-return skipped the anchor update.
         let mut c = DelayClock::new(None, 33.0);
         c.next_delay(Some(0.0));
         c.next_delay(Some(0.0));

@@ -1,16 +1,9 @@
-//! Pillow-compatible unsharp mask.
-//!
-//! Algorithm (matches Pillow's `UnsharpMask` in `ImageFilter.c`):
-//! 1. Gaussian blur of input with radius `r`.
-//! 2. For each pixel: diff = orig - blurred (per channel).
-//! 3. If |diff| < threshold, keep orig unchanged.
-//! 4. Else orig += diff * (percent / 100).
-//! 5. Clamp to [0, 255].
+//! RGB888 sharpening with a separable box blur and a per-channel threshold.
 
 #[derive(Debug, Clone)]
 pub struct UnsharpParams {
     pub radius: f32,
-    pub amount: f32, // 0.0..1.0 (Pillow's "percent" is `amount * 100`)
+    pub amount: f32, // Gain multiplier; nonpositive values disable sharpening.
     pub threshold: i32,
 }
 
@@ -20,7 +13,7 @@ pub fn unsharp_rgb888(buf: &mut [u8], width: u32, height: u32, p: &UnsharpParams
         return;
     }
     let blurred = box_blur_rgb888(buf, width, height, p.radius.max(0.1));
-    let percent = p.amount; // already 0..1
+    let percent = p.amount;
 
     for i in 0..buf.len() {
         let orig = buf[i] as i32;
@@ -34,19 +27,15 @@ pub fn unsharp_rgb888(buf: &mut [u8], width: u32, height: u32, p: &UnsharpParams
     }
 }
 
-/// 2-pass separable box blur via sliding-window running sums (O(W·H), not
-/// O(W·H·R)).
-///
-/// Output is bit-identical to the prior O(W·H·R) implementation: same window
-/// clamping at edges, same per-pixel `sum / count` truncation.
+/// Computes a separable box blur in O(width * height).
+/// Edge windows use only in-bounds pixels; each pass truncates its average.
 fn box_blur_rgb888(src: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> {
     let r = radius.round().max(1.0) as i32;
     let w = width as i32;
     let h = height as i32;
     let stride = (w as usize) * 3;
 
-    // Horizontal pass: src → tmp. We don't read tmp before writing it, so it
-    // doesn't need to be initialized from src.
+    // Every temporary pixel is written before the vertical pass reads it.
     let mut tmp = vec![0u8; src.len()];
     for y in 0..h as usize {
         let row_in = &src[y * stride..(y + 1) * stride];
@@ -54,14 +43,12 @@ fn box_blur_rgb888(src: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> 
         blur_row(row_in, row_out, w, r);
     }
 
-    // Vertical pass: tmp → out. We walk down columns; each column is a
-    // strided view into tmp, so we read with stride `stride`.
     let mut out = vec![0u8; src.len()];
     let mut sums = vec![0u32; (w as usize) * 3];
     let r_us = r as usize;
     let h_us = h as usize;
 
-    // Initialize per-column running sums for y=0: window is rows [0, r] (clamped).
+    // The first window includes rows 0 through r, clipped to the image.
     let init_end = r_us.min(h_us - 1);
     for yy in 0..=init_end {
         add_row_to_sums(&mut sums, &tmp[yy * stride..(yy + 1) * stride]);
@@ -70,8 +57,6 @@ fn box_blur_rgb888(src: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> 
 
     for y in 0..h_us {
         write_quotient_row(&sums, &mut out[y * stride..(y + 1) * stride], count);
-        // Advance window for y+1: add row (y + r + 1) if in bounds, remove
-        // row (y - r) if in bounds.
         let incoming = y as i32 + r + 1;
         if incoming < h {
             add_row_to_sums(
@@ -92,9 +77,7 @@ fn box_blur_rgb888(src: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> 
     out
 }
 
-/// Add `row`'s u8 bytes (widened to u32) into the running `sums` array,
-/// element-wise. SIMD path: 8 lanes via `wide::u32x8`. With v3 baseline this
-/// emits AVX2 `vpmovzxbd` + `vpaddd`.
+/// Adds a row to per-channel sums using eight SIMD lanes and a scalar tail.
 fn add_row_to_sums(sums: &mut [u32], row: &[u8]) {
     debug_assert_eq!(sums.len(), row.len());
     let n = sums.len();
@@ -131,7 +114,7 @@ fn add_row_to_sums(sums: &mut [u32], row: &[u8]) {
     }
 }
 
-/// Subtract `row`'s u8 bytes (widened to u32) from `sums`, element-wise.
+/// Subtracts a row from per-channel sums using eight SIMD lanes and a scalar tail.
 fn sub_row_from_sums(sums: &mut [u32], row: &[u8]) {
     debug_assert_eq!(sums.len(), row.len());
     let n = sums.len();
@@ -168,9 +151,7 @@ fn sub_row_from_sums(sums: &mut [u32], row: &[u8]) {
     }
 }
 
-/// Write `(sums[i] / count) as u8` to `row_out`. Scalar — `wide` has no
-/// integer divide, and the compiler with v3 still vectorizes the unsigned
-/// division-by-variable as a magic-multiply sequence per lane group.
+/// Writes truncated per-channel averages; `wide` has no integer division.
 fn write_quotient_row(sums: &[u32], row_out: &mut [u8], count: u32) {
     debug_assert_eq!(sums.len(), row_out.len());
     for (s, r) in sums.iter().zip(row_out.iter_mut()) {
@@ -178,7 +159,7 @@ fn write_quotient_row(sums: &[u32], row_out: &mut [u8], count: u32) {
     }
 }
 
-/// Blur one row with a 1-D sliding window of half-width `r`, edge-clamped.
+/// Blurs one row with a 1-D sliding window of half-width `r`, edge-clamped.
 fn blur_row(row_in: &[u8], row_out: &mut [u8], w: i32, r: i32) {
     let w_us = w as usize;
     let r_us = r as usize;
@@ -218,7 +199,7 @@ fn blur_row(row_in: &[u8], row_out: &mut [u8], w: i32, r: i32) {
 mod tests {
     use super::*;
 
-    /// Reference implementation (the pre-sliding-window version) for parity.
+    /// Direct window summation provides an independent blur reference.
     fn box_blur_naive(src: &[u8], width: u32, height: u32, radius: f32) -> Vec<u8> {
         let mut tmp = src.to_vec();
         let r = radius.round().max(1.0) as i32;

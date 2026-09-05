@@ -1,5 +1,4 @@
-//! Stream orchestration: per-stream state machine, FrameSource enum,
-//! producer/sampler (paced mode), native cadence runner.
+//! Source routing, playback runners, and per-stream lifecycle management.
 
 pub mod fetcher;
 pub mod frame_source;

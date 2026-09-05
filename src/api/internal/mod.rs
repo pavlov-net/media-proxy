@@ -1,7 +1,4 @@
-//! `internal:` URL scheme endpoints.
-//!
-//! `internal:placeholder/...` → this server
-//! `internal:ha/...` → Home Assistant (delegated to `media-proxy-addon`)
+//! Placeholder image generation and the unsupported Home Assistant drawing endpoint.
 
 pub mod homeassistant;
 pub mod placeholder;

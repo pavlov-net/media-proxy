@@ -1,9 +1,5 @@
-//! Map `HwBackend` to ffmpeg CLI `-hwaccel` flag + surface detection.
-//!
-//! `ffmpeg -hwaccels` lists *compiled-in* support, not what works at runtime
-//! — distros ship binaries with `vaapi` enabled even on systems where
-//! `/dev/dri/renderD*` isn't accessible. We probe each listed backend by
-//! actually creating the hwdevice; only working ones are returned.
+//! Detects usable ffmpeg hardware backends by initializing each compiled-in
+//! device type. Listed backends can lack an accessible runtime device.
 
 use std::process::Command;
 use std::sync::OnceLock;
@@ -44,8 +40,7 @@ fn detect() -> Vec<HwBackend> {
     working
 }
 
-/// `-init_hw_device` calls `av_hwdevice_ctx_create` eagerly, so a failure
-/// here mirrors what the real decode would hit.
+/// Tests device creation; compiled-in support alone does not guarantee access.
 fn probe(backend: HwBackend) -> bool {
     let device_arg = format!("{}=probe", backend.as_ffmpeg_flag());
     Command::new("ffmpeg")
@@ -70,9 +65,7 @@ fn probe(backend: HwBackend) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Resolve a stream's hardware-accel preference against the system's
-/// available backends. `HwPref::None` opts out explicitly; `Auto` walks the
-/// platform candidate list; a specific backend is honored if available.
+/// Selects an available backend, using platform order for Auto and CPU for None.
 pub fn pick_for(pref: HwPref) -> Option<HwBackend> {
     platform::pick_hw_backend(pref.as_canon().unwrap_or("none"), available())
 }
