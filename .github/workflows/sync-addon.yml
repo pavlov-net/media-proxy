@@ -4,7 +4,7 @@ on:
   pull_request:
   workflow_dispatch:
   release:
-    types: [published]
+    types: [published, released]
 
 permissions:
   contents: read
@@ -14,6 +14,8 @@ env:
 
 jobs:
   build:
+    # Handle prerelease publication and stable promotion without duplicate builds.
+    if: github.event_name != 'release' || github.event.action == 'released' || github.event.release.prerelease
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +53,9 @@ jobs:
           python3 tests/smoke.py --binary ./target/$TARGET/release/media-proxy
           mkdir -p dist
           ASSET="media-proxy-${VERSION}-${TARGET}.tar.gz"
-          tar -czf "dist/$ASSET" -C "target/$TARGET/release" media-proxy ddp-view -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md
+          tar -czf "dist/$ASSET" -C "target/$TARGET/release" media-proxy ddp-view \
+            -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md \
+            vendor/image-webp/LICENSE-MIT vendor/image-webp/LICENSE-APACHE
           cd dist
           sha256sum "$ASSET" > "$ASSET.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -78,7 +82,8 @@ jobs:
         run: gh release upload "$RELEASE_TAG" dist/* --clobber
 
   notify-addon:
-    if: github.event_name == 'release' && !github.event.release.prerelease
+    # Enable only after the add-on migration is merged; its old listener auto-merges.
+    if: github.event_name == 'release' && !github.event.release.prerelease && vars.ADDON_RELEASE_DISPATCH_ENABLED == 'true'
     needs: publish
     runs-on: ubuntu-latest
     steps:
