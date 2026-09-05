@@ -1,8 +1,7 @@
 //! Text rendering — BBCode parser + BDF font blitter.
 //!
 //! No MDI icon-atlas support: TTF rendering would pull in another dependency,
-//! and LED use cases can render MDI glyphs as Unicode text via the HA
-//! template handler instead.
+//! and the bundled Spleen fonts do not contain MDI private-use glyphs.
 
 pub mod bbcode;
 pub mod bdf;

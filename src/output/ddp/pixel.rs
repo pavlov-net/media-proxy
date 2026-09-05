@@ -74,7 +74,12 @@ pub fn rgb888_to_565(input: &[u8], endian: Endian) -> Vec<u8> {
 
 #[inline]
 fn convert_to(input: &[u8], out: &mut [u8], to_bytes: fn(u16) -> [u8; 2]) {
-    for (i_chunk, o_chunk) in input.chunks_exact(3).zip(out.chunks_exact_mut(2)) {
+    for (i_chunk, o_chunk) in input
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(out.as_chunks_mut::<2>().0.iter_mut())
+    {
         let v = LUT_R5_SHIFTED[i_chunk[0] as usize]
             | LUT_G6_SHIFTED[i_chunk[1] as usize]
             | LUT_B5[i_chunk[2] as usize];

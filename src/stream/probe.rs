@@ -74,7 +74,7 @@ async fn probe_file(parsed: &Url) -> Option<MediaKind> {
     }
 }
 
-fn classify_content_type(ct: &str) -> Option<MediaKind> {
+pub(crate) fn classify_content_type(ct: &str) -> Option<MediaKind> {
     let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     // IP-camera MJPEG and similar pushed-frames streams: `.jpg`-extension
     // URL but the response is a multipart stream that ffmpeg handles.

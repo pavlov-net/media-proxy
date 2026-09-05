@@ -1,12 +1,13 @@
 # media-proxy — Cutover Smoke Test
 
-Checklist for validating the Rust port against a real LED device before
-flipping the `v*-final-python` tag.
+Checklist for validating the Rust port against a real LED device before publishing the Rust add-on. The retained default media paths are the
+release gate; Home Assistant entity/template drawing was intentionally removed.
 
 ## Build
 
 - [ ] `cargo build --release` — produces `target/release/media-proxy`.
-- [ ] `cargo test` — all unit tests green.
+- [ ] `cargo test --locked --all-targets` — all unit tests green.
+- [ ] `python3 tests/smoke.py --binary target/release/media-proxy` — retained APIs and DDP pass.
 - [ ] `cargo clippy --all-targets -- -D warnings` — clean.
 - [ ] `cargo fmt --all --check` — clean.
 
@@ -52,11 +53,7 @@ Websocket client sends (via `websocat` or similar):
       rendered in the default Spleen font.
 - [ ] `GET /api/internal/placeholder/128x32/red/white.png?text=ALERT` — red
       background, white text.
-- [ ] `GET /api/internal/homeassistant/anything.png` — 501 (addon owns
-      this endpoint in the long-term split).
-- [ ] `POST /api/convert/animimg` with `{"source":"file:///tmp/anim.gif",
-      "width":64,"height":64}` — returns a ZIP containing
-      `frame_NNN.png`, `animimg_config.yaml`, `README.txt`.
+- [ ] `GET /api/internal/homeassistant/anything.png` — 501 (intentionally removed).
 
 ## Performance sanity
 
@@ -87,8 +84,7 @@ Loop a 720p H.264 file and watch `ffmpeg` CPU vs. GPU usage:
 
 ## Cutover
 
-- [ ] Tag Python repo `v*-final-python`.
+- [ ] Record the last Python core tag (`v0.5.11`) and take a Home Assistant add-on backup.
 - [ ] Bump Rust crate version, cut release.
 - [ ] Addon repo: bundle the Rust binary, update the entrypoint.
-- [ ] Confirm `internal:ha/...` URLs route to the addon's HA endpoint
-      (the Rust core returns 501 as expected).
+- [ ] Confirm release notes explicitly mention removal of Home Assistant entity/template drawing.

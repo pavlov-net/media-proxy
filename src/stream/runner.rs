@@ -122,15 +122,29 @@ pub async fn run_paced(
     let producer = async {
         let mut source = source;
         let mut count: u64 = 0;
+        let mut deadline = time::Instant::now();
         loop {
             match time::timeout(FRAME_WATCHDOG, source.next()).await {
                 Ok(Some(f)) => {
                     count += 1;
                     *latest.lock() = Some(f.rgb888);
+                    // Decoders can produce much faster than playback. Keep
+                    // the producer on source cadence so the sampler sees each
+                    // frame, including the final frame of a finite source.
+                    deadline += Duration::from_secs_f32(f.delay_ms.max(10.0) / 1000.0);
+                    let now = time::Instant::now();
+                    if deadline + Duration::from_millis(100) < now {
+                        deadline = now;
+                    } else {
+                        time::sleep_until(deadline).await;
+                    }
                 }
                 Ok(None) => {
                     if let Some(err) = source.take_error().await {
                         return Err(err);
+                    }
+                    if fields.r#loop && source.try_rewind() {
+                        continue;
                     }
                     return Ok(count);
                 }

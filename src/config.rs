@@ -325,8 +325,8 @@ impl Default for PlaybackStillConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResolverConfig {
-    /// URL of the addon-side resolver. When unset, resolver requests fail
-    /// closed (used in tests with the fake resolver).
+    /// Optional external resolver URL. When unset, detect yt-dlp on PATH;
+    /// direct media works even when neither resolver is available.
     pub url: Option<String>,
     #[serde(default = "default_resolver_timeout")]
     pub timeout_ms: u64,
@@ -382,6 +382,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn defaults_match_final_python_config() {
+        // Captured from src/config.py at the parent of rewrite commit 2a88de2.
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/python-config-defaults.json")).unwrap();
+        // JSON serialization uses the shortest f32 representation, avoiding
+        // artificial f64 widening differences such as 0.6 -> 0.600000024.
+        let mut actual: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&Config::default()).unwrap()).unwrap();
+        actual.as_object_mut().unwrap().remove("resolver");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn legacy_yaml_merges_nested_defaults_and_uppercase_logging() {
+        let mut file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        use std::io::Write;
+        write!(file, "hw:\n  prefer: none\nyoutube:\n  60fps: false\nimage:\n  unsharp:\n    amount: 0.5\nlog:\n  level: WARNING\n").unwrap();
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(!config.youtube.prefer_60fps);
+        assert_eq!(config.log.level, LogLevel::Warning);
+        assert_eq!(config.image.unsharp.amount, 0.5);
+        assert_eq!(config.image.unsharp.radius, 0.6);
+        assert_eq!(config.hw.prefer, "none");
+    }
 
     #[test]
     fn defaults_are_stable() {

@@ -45,7 +45,9 @@ pub enum PixelFormat {
 impl PixelFormat {
     pub fn from_str_canon(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "rgb888" => Some(Self::Rgb888),
+            // Python sent RGB888 for the ddp-esphome rgbw option; the
+            // receiver converts RGB input for its RGBW light renderer.
+            "rgb888" | "rgbw" => Some(Self::Rgb888),
             "rgb565le" => Some(Self::Rgb565Le),
             "rgb565be" => Some(Self::Rgb565Be),
             _ => None,

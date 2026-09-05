@@ -1,7 +1,7 @@
 //! `GET /api/internal/homeassistant/{spec}` — Home Assistant lookup shim.
 //!
-//! Returns 501 here; the `media-proxy-addon` owns this endpoint and the
-//! response signals it to route around us.
+//! Entity/template drawing was intentionally removed in the Rust rewrite.
+//! Keep an explicit 501 response for old source URLs.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 pub async fn homeassistant() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "HA endpoint served by media-proxy-addon",
+        "Home Assistant entity/template drawing is no longer supported",
     )
         .into_response()
 }

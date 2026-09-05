@@ -1,6 +1,5 @@
 //! HTTP + WebSocket server.
 
-pub mod animimg;
 pub mod health;
 pub mod internal;
 pub mod state;
@@ -24,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::get;
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -51,7 +50,6 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
 
     let app = Router::new()
         .route("/api/system/health", get(health::health))
-        .route("/api/convert/animimg", post(animimg::convert))
         .route("/api/internal/placeholder/{*spec}", get(internal::placeholder))
         .route(
             "/api/internal/homeassistant/{*spec}",

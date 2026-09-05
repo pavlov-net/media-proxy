@@ -31,8 +31,9 @@ pub struct ApngDecoder {
 
 impl ApngDecoder {
     pub fn new(data: Vec<u8>, _source_url: &str) -> Result<Self, ImageError> {
-        let decoder = png::Decoder::new(std::io::Cursor::new(data));
-        let reader = decoder
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder
             .read_info()
             .map_err(|e| ImageError::Decode(format!("png: {e}")))?;
         let info = reader.info();
@@ -57,6 +58,14 @@ impl ApngDecoder {
         let buf_size = reader
             .output_buffer_size()
             .ok_or_else(|| ImageError::Decode("png: output buffer size unknown".into()))?;
+        let mut sub_buf = vec![0u8; buf_size];
+        // An APNG may have a fallback PNG that is not part of the animation.
+        // Its IDAT precedes the first fcTL; consume it without emitting a frame.
+        if frame_count.is_some() && reader.info().frame_control.is_none() {
+            reader
+                .next_frame(&mut sub_buf)
+                .map_err(|e| ImageError::Decode(format!("apng default image: {e}")))?;
+        }
         Ok(Self {
             canvas: vec![0u8; canvas_bytes],
             previous_canvas: vec![0u8; canvas_bytes],
@@ -64,7 +73,7 @@ impl ApngDecoder {
             height,
             frames_read: 0,
             frame_count,
-            sub_buf: vec![0u8; buf_size],
+            sub_buf,
             rgba_sub: Vec::new(),
             reader,
         })
@@ -84,8 +93,6 @@ impl ApngDecoder {
         }
 
         let row_bytes = (copy_w * 4) as usize;
-        let sub_stride = (w * 4) as usize;
-        let canvas_stride = (canvas_w * 4) as usize;
 
         for row in 0..copy_h {
             let sub_off = (row * w * 4) as usize;
@@ -99,10 +106,6 @@ impl ApngDecoder {
                 }
                 BlendOp::Over => composite_row_over(canvas_row, sub_row),
             }
-
-            // Stride guards against accidental over-read in debug builds.
-            debug_assert!(sub_off + sub_stride <= rgba_sub.len() || copy_w == w);
-            debug_assert!(canvas_off + canvas_stride <= self.canvas.len() || copy_w == canvas_w);
         }
     }
 
@@ -220,7 +223,12 @@ impl ApngDecoder {
 fn composite_row_over(dst: &mut [u8], src: &[u8]) {
     debug_assert_eq!(dst.len(), src.len());
     debug_assert!(dst.len().is_multiple_of(4));
-    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+    for (d, s) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0.iter())
+    {
         let sa = s[3];
         if sa == 255 {
             d.copy_from_slice(s);
@@ -229,12 +237,18 @@ fn composite_row_over(dst: &mut [u8], src: &[u8]) {
         if sa == 0 {
             continue;
         }
-        let sa_u = u16::from(sa);
-        let inv = 255 - sa_u;
-        d[0] = ((u16::from(s[0]) * sa_u + u16::from(d[0]) * inv) / 255) as u8;
-        d[1] = ((u16::from(s[1]) * sa_u + u16::from(d[1]) * inv) / 255) as u8;
-        d[2] = ((u16::from(s[2]) * sa_u + u16::from(d[2]) * inv) / 255) as u8;
-        d[3] = ((sa_u * 255 + u16::from(d[3]) * inv) / 255) as u8;
+        // Straight-alpha OVER. Weight destination RGB by its alpha too;
+        // otherwise a half-transparent pixel over transparent black darkens
+        // twice when the result is later flattened for an LED display.
+        let sa = u32::from(sa);
+        let da = u32::from(d[3]);
+        let inv = 255 - sa;
+        let alpha = sa * 255 + da * inv;
+        for channel in 0..3 {
+            let value = u32::from(s[channel]) * sa * 255 + u32::from(d[channel]) * da * inv;
+            d[channel] = ((value + alpha / 2) / alpha) as u8;
+        }
+        d[3] = ((alpha + 127) / 255) as u8;
     }
 }
 
@@ -253,7 +267,12 @@ fn expand_to_rgba8(
             out.copy_from_slice(&buf[..n_pixels * 4]);
         }
         ColorType::Rgb => {
-            for (src, dst) in buf.chunks_exact(3).zip(out.chunks_exact_mut(4)) {
+            for (src, dst) in buf
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(out.as_chunks_mut::<4>().0.iter_mut())
+            {
                 dst[0] = src[0];
                 dst[1] = src[1];
                 dst[2] = src[2];
@@ -261,7 +280,12 @@ fn expand_to_rgba8(
             }
         }
         ColorType::GrayscaleAlpha => {
-            for (src, dst) in buf.chunks_exact(2).zip(out.chunks_exact_mut(4)) {
+            for (src, dst) in buf
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(out.as_chunks_mut::<4>().0.iter_mut())
+            {
                 let (g, a) = (src[0], src[1]);
                 dst[0] = g;
                 dst[1] = g;
@@ -270,7 +294,7 @@ fn expand_to_rgba8(
             }
         }
         ColorType::Grayscale => {
-            for (src, dst) in buf.iter().zip(out.chunks_exact_mut(4)) {
+            for (src, dst) in buf.iter().zip(out.as_chunks_mut::<4>().0.iter_mut()) {
                 let g = *src;
                 dst[0] = g;
                 dst[1] = g;
@@ -285,4 +309,47 @@ fn expand_to_rgba8(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_subframe_on_last_row_composites() {
+        let mut data = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut data, 2, 2);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.set_animated(2, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0; 16]).unwrap();
+            writer.set_frame_dimension(1, 1).unwrap();
+            writer.set_frame_position(1, 1).unwrap();
+            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+        }
+        let mut decoder = ApngDecoder::new(data, "test").unwrap();
+        decoder.next_frame().unwrap().unwrap();
+        let frame = decoder.next_frame().unwrap().unwrap();
+        assert_eq!(&frame.rgba[12..], &[255, 0, 0, 255]);
+        assert!(decoder.next_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn indexed_apng_expands_palette_and_transparency() {
+        let mut data = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut data, 1, 1);
+            encoder.set_color(ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::One);
+            encoder.set_palette(vec![255, 0, 0, 0, 0, 255]);
+            encoder.set_trns(vec![255, 0]);
+            encoder.set_animated(1, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[0]).unwrap();
+        }
+        let mut decoder = ApngDecoder::new(data, "test").unwrap();
+        assert_eq!(decoder.next_frame().unwrap().unwrap().rgba, [255, 0, 0, 255]);
+    }
 }

@@ -1,0 +1,55 @@
+{
+  "hw": {
+    "prefer": "auto"
+  },
+  "video": {
+    "expand_mode": 2,
+    "fit": "auto",
+    "autocrop": {
+      "enabled": false,
+      "probe_frames": 24,
+      "luma_thresh": 16,
+      "max_bar_ratio": 0.15,
+      "min_bar_px": 2
+    }
+  },
+  "playback": {
+    "loop": true
+  },
+  "youtube": {
+    "60fps": true,
+    "cache": {
+      "enabled": true,
+      "max_size": 5242880
+    }
+  },
+  "image": {
+    "method": "lanczos",
+    "gamma_correct": false,
+    "color_correction": true,
+    "unsharp": {
+      "amount": 0.0,
+      "radius": 0.6,
+      "threshold": 2
+    },
+    "frame_cache_mb": 32,
+    "frame_cache_min_frames": 5
+  },
+  "log": {
+    "send_ms": false,
+    "rate_ms": 5000,
+    "level": "info",
+    "metrics": true
+  },
+  "net": {
+    "win_timer_res": true,
+    "spread_packets": true,
+    "spread_max_fps": 60,
+    "spread_min_ms": 3.0,
+    "spread_max_sleeps": 0,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+  },
+  "playback_still": {
+    "redundancy": 3
+  }
+}

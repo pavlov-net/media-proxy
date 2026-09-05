@@ -75,14 +75,14 @@ impl YtDlp {
         timeout: Duration,
     ) -> Result<output::Info, YtDlpError> {
         let mut cmd = Command::new(&self.bin);
-        cmd.args(["-j", "--no-warnings", "--no-playlist", "-f"])
+        cmd.args(["--ignore-config", "-j", "--no-warnings", "--no-playlist", "-f"])
             .arg(format_expr)
-            .arg(url)
             .kill_on_drop(true);
 
         if let Some(deno) = &self.deno {
             cmd.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
         }
+        cmd.arg("--").arg(url);
 
         debug!(
             url = %url,
@@ -137,5 +137,64 @@ impl YtDlp {
 
         let info: output::Info = serde_json::from_slice(&out.stdout)?;
         Ok(info)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn executable(script: &str) -> (tempfile::TempDir, YtDlp) {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("yt-dlp");
+        std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, YtDlp { bin, deno: None })
+    }
+
+    #[tokio::test]
+    async fn subprocess_arguments_and_headers_round_trip() {
+        let (_dir, mut driver) = executable(
+            r#"
+[ "$1" = '--ignore-config' ] || exit 1
+[ "$6" = 'best[height<=64]' ] || exit 2
+[ "$7" = '--js-runtimes' ] || exit 3
+[ "$8" = 'deno:/a path/deno' ] || exit 4
+[ "$9" = '--' ] || exit 5
+shift 9
+[ "$1" = '--not-an-option' ] || exit 6
+printf '%s' '{"url":"https://cdn.example/video","fps":60,"filesize":123,"http_headers":{"Referer":"https://example.com/"}}'
+"#,
+        );
+        driver.deno = Some("/a path/deno".into());
+        let info = driver
+            .resolve("--not-an-option", "best[height<=64]", Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(info.fps, Some(60.0));
+        assert_eq!(info.filesize, Some(123));
+        assert_eq!(info.http_headers.unwrap()["Referer"], "https://example.com/");
+    }
+
+    #[tokio::test]
+    async fn subprocess_errors_and_deadlines_surface() {
+        let (_dir, driver) = executable("echo 'ERROR: extraction failed' >&2; exit 7");
+        assert!(matches!(
+            driver
+                .resolve("https://example.com", "best", Duration::from_secs(5))
+                .await,
+            Err(YtDlpError::Failed {
+                exit_code: Some(7),
+                ..
+            })
+        ));
+        let (_dir, driver) = executable("exec sleep 30");
+        assert!(matches!(
+            driver
+                .resolve("https://example.com", "best", Duration::from_millis(50))
+                .await,
+            Err(YtDlpError::Timeout)
+        ));
     }
 }
