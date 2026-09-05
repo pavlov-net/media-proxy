@@ -424,8 +424,7 @@ See: [lvgl-ddp-stream](https://github.com/stuartparmenter/lvgl-ddp-stream) for E
 The retained media APIs and Python configuration defaults are covered by a
 captured defaults fixture and by `python3 tests/smoke.py --binary target/debug/media-proxy`.
 The smoke test generates local media using FFmpeg and checks health/placeholder endpoints,
-WebSocket control, and real UDP output. See [RELEASE_READINESS.md](RELEASE_READINESS.md)
-for the compatibility scope, intentional removals, and release order.
+WebSocket control, and real UDP output.
 
 Home Assistant entity/template drawing was intentionally removed in the Rust
 rewrite. `/api/internal/homeassistant/*` returns 501; it is not an add-on feature
