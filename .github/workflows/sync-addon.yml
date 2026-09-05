@@ -1,51 +1,91 @@
-name: Sync Add-on
+name: Release binaries
 
 on:
+  pull_request:
+  workflow_dispatch:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  notify-addon:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools ffmpeg
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build portable static binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --locked --release --bins --target "$TARGET"
+      - name: Package and smoke test
+        env:
+          TARGET: ${{ matrix.target }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ -n "$RELEASE_TAG" ]; then
+            test "${RELEASE_TAG#v}" = "$VERSION"
+          fi
+          ./target/$TARGET/release/media-proxy --version
+          ./target/$TARGET/release/ddp-view --help
+          python3 tests/smoke.py --binary ./target/$TARGET/release/media-proxy
+          mkdir -p dist
+          ASSET="media-proxy-${VERSION}-${TARGET}.tar.gz"
+          tar -czf "dist/$ASSET" -C "target/$TARGET/release" media-proxy ddp-view -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md
+          cd dist
+          sha256sum "$ASSET" > "$ASSET.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
-      - name: Checkout media-proxy repo
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          fetch-depth: 0
+          path: dist
+          merge-multiple: true
+      - name: Attach verified binaries and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
 
-      - name: Determine bump type
-        id: bump
-        run: |
-          # Get current and previous tags
-          CURRENT="${{ github.event.release.tag_name }}"
-          PREVIOUS=$(git tag --sort=-version:refname | grep -v "$CURRENT" | head -n1)
-
-          # Strip 'v' prefix and split versions
-          CURR_VER="${CURRENT#v}"
-          PREV_VER="${PREVIOUS#v}"
-
-          IFS='.' read -ra CURR <<< "$CURR_VER"
-          IFS='.' read -ra PREV <<< "$PREV_VER"
-
-          # Compare major.minor.patch
-          if [[ ${CURR[0]} -gt ${PREV[0]} ]]; then
-            echo "type=major" >> $GITHUB_OUTPUT
-          elif [[ ${CURR[1]} -gt ${PREV[1]} ]]; then
-            echo "type=minor" >> $GITHUB_OUTPUT
-          else
-            echo "type=patch" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Send repository dispatch to addon
+  notify-addon:
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify add-on only after both architectures are available
         uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4
         with:
           token: ${{ secrets.DISPATCH_TOKEN }}
           repository: stuartparmenter/media-proxy-addon
           event-type: app-release
-          client-payload: |
-            {
-              "version": "${{ github.event.release.tag_name }}",
-              "bump_type": "${{ steps.bump.outputs.type }}"
-            }
+          client-payload: '{"version": "${{ github.event.release.tag_name }}"}'

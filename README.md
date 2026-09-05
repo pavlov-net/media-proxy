@@ -20,10 +20,13 @@ Available as a Home Assistant add-on or standalone Rust binary.
 ## Requirements
 
 - Rust 1.98.1+ (edition 2024) — only needed to build from source
-- `ffmpeg` on `PATH` for video sources
+- `ffmpeg` and `ffprobe` on `PATH` for video sources
 - Network access to your displays (UDP, typically port 4048)
 
-YouTube resolution + Deno EJS solver live in the companion [`media-proxy-addon`](https://github.com/stuartparmenter/media-proxy-addon); the core does not bundle yt-dlp.
+YouTube and other web-page sources use an external `yt-dlp` executable. The
+[Home Assistant add-on](https://github.com/stuartparmenter/media-proxy-addon)
+installs yt-dlp, its EJS solver package, Deno, and FFmpeg. Standalone users install
+these separately; direct files, images, and streams do not require yt-dlp.
 
 ---
 
@@ -42,11 +45,48 @@ YouTube resolution + Deno EJS solver live in the companion [`media-proxy-addon`]
 
 ### Standalone Binary
 
+Linux releases provide `media-proxy` and `ddp-view` for x86-64 and aarch64, built
+with musl and a statically linked Little CMS. The x86-64 binary supports the
+baseline instruction set; AVX2 is not required. Download the matching `.tar.gz`
+and `.tar.gz.sha256` from [Releases](https://github.com/pavlov-net/media-proxy/releases),
+then verify and extract them:
+
 ```bash
-git clone https://github.com/stuartparmenter/media-proxy.git
+sha256sum -c media-proxy-1.0.0-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf media-proxy-1.0.0-x86_64-unknown-linux-musl.tar.gz
+./media-proxy --host 0.0.0.0 --port 8788
+```
+
+To build from source (Rust 1.98.1):
+
+```bash
+git clone https://github.com/pavlov-net/media-proxy.git
 cd media-proxy
 cargo build --release
 ./target/release/media-proxy --host 0.0.0.0 --port 8788
+```
+
+For YouTube, install [Deno](https://docs.deno.com/runtime/getting_started/installation/)
+(2.6.6 or newer) and yt-dlp with its default extras, then ensure both executables
+are on the service's `PATH`:
+
+```bash
+uv tool install 'yt-dlp[default]'
+yt-dlp --version
+deno --version
+```
+
+The `[default]` extra installs `yt-dlp-ejs`, which supplies the JavaScript solver
+used for YouTube signatures. Installing bare `yt-dlp` can leave that solver
+missing. Keep yt-dlp and its matching EJS dependency current; `curl-cffi` is an
+optional extra for sites needing browser impersonation. Core startup logs show
+whether a local yt-dlp, an explicit `resolver.url`, or no resolver was selected.
+An external resolver is optional, and takes precedence when configured:
+
+```yaml
+resolver:
+  url: http://127.0.0.1:8790/resolve
+  timeout_ms: 30000
 ```
 
 CLI flags:
@@ -379,14 +419,15 @@ See: [lvgl-ddp-stream](https://github.com/stuartparmenter/lvgl-ddp-stream) for E
 
 ---
 
-## Rust compatibility checks
+## Rust cutover and validation
 
-Run `cargo test --locked --all-targets` and, after `cargo build --locked --bins`,
-`python3 tests/smoke.py --binary target/debug/media-proxy` (requires FFmpeg).
-Tests compare all retained Python configuration defaults, animated disposal and
-cached frame output, and real HTTP/WebSocket/DDP behavior. See
-[the disposal fixture notes](tests/fixtures/animated/README.md) for reference details.
+The retained media APIs and Python configuration defaults are covered by a
+captured defaults fixture and by `python3 tests/smoke.py --binary target/debug/media-proxy`.
+The smoke test generates local media using FFmpeg and checks health/placeholder endpoints,
+WebSocket control, and real UDP output. See [RELEASE_READINESS.md](RELEASE_READINESS.md)
+for the compatibility scope, intentional removals, and release order.
 
 Home Assistant entity/template drawing was intentionally removed in the Rust
-rewrite (`/api/internal/homeassistant/*` returns 501). The animimg frame-to-ZIP
-utility has also been removed; it is outside the streaming service's scope.
+rewrite. `/api/internal/homeassistant/*` returns 501; it is not an add-on feature
+that will be restored by this migration. The `/api/convert/animimg` utility was
+also removed; frame-to-ZIP conversion is outside the streaming service’s scope.
