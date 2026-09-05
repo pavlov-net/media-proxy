@@ -27,17 +27,8 @@ impl Resolver for PassthroughLayer {
         // Extensionless camera endpoints and signed CDN URLs may already be
         // direct media. Only HTML/unknown responses need an extractor.
         if matches!(classify(&req.url), crate::stream::url::UrlKind::HttpUnknown)
-            && let Ok(response) = crate::stream::http::CLIENT
-                .head(&req.url)
-                .header(reqwest::header::USER_AGENT, &self.user_agent)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
+            && crate::stream::probe::probe_http(&req.url, &self.user_agent)
                 .await
-            && response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(crate::stream::probe::classify_content_type)
                 .is_some()
         {
             return Ok(ResolveResponse::passthrough(req.url));
