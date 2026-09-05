@@ -27,37 +27,72 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: "1.98.1"
-          targets: ${{ matrix.target }}
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools ffmpeg
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: ${{ matrix.target }}
-      - name: Build portable static binaries
+      - name: Inspect existing release assets
+        id: assets
         env:
-          TARGET: ${{ matrix.target }}
-        run: cargo build --locked --release --bins --target "$TARGET"
-      - name: Package and smoke test
-        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TARGET: ${{ matrix.target }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          ASSET="media-proxy-${VERSION}-${TARGET}.tar.gz"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "reuse=false" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
           if [ -n "$RELEASE_TAG" ]; then
             test "${RELEASE_TAG#v}" = "$VERSION"
+            gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets"
+            ARCHIVE=false
+            CHECKSUM=false
+            if grep -Fxq "$ASSET" "$RUNNER_TEMP/release-assets"; then ARCHIVE=true; fi
+            if grep -Fxq "$ASSET.sha256" "$RUNNER_TEMP/release-assets"; then CHECKSUM=true; fi
+            if [ "$ARCHIVE" != "$CHECKSUM" ]; then
+              echo "::error::Incomplete release asset pair for $ASSET. Restore or remove the orphaned asset before retrying."
+              exit 1
+            fi
+            if [ "$ARCHIVE" = true ]; then
+              gh release download "$RELEASE_TAG" --pattern "$ASSET" --pattern "$ASSET.sha256" --dir dist
+              (cd dist && sha256sum -c "$ASSET.sha256")
+              mkdir -p "$RUNNER_TEMP/release-binaries"
+              tar -xzf "dist/$ASSET" -C "$RUNNER_TEMP/release-binaries" media-proxy ddp-view
+              echo "reuse=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
-          ./target/$TARGET/release/media-proxy --version
-          ./target/$TARGET/release/ddp-view --help
-          python3 tests/smoke.py --binary ./target/$TARGET/release/media-proxy
-          mkdir -p dist
-          ASSET="media-proxy-${VERSION}-${TARGET}.tar.gz"
-          tar -czf "dist/$ASSET" -C "target/$TARGET/release" media-proxy ddp-view \
-            -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md \
-            vendor/image-webp/LICENSE-MIT vendor/image-webp/LICENSE-APACHE
-          cd dist
-          sha256sum "$ASSET" > "$ASSET.sha256"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.assets.outputs.reuse != 'true'
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - if: steps.assets.outputs.reuse != 'true'
+        run: sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.assets.outputs.reuse != 'true'
+        with:
+          key: ${{ matrix.target }}
+      - name: Build portable static binaries
+        if: steps.assets.outputs.reuse != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --locked --release --bins --target "$TARGET"
+      - name: Smoke test and package new binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET: ${{ steps.assets.outputs.asset }}
+          REUSE: ${{ steps.assets.outputs.reuse }}
+        run: |
+          BIN_DIR="target/$TARGET/release"
+          if [ "$REUSE" = true ]; then BIN_DIR="$RUNNER_TEMP/release-binaries"; fi
+          "$BIN_DIR/media-proxy" --version
+          "$BIN_DIR/ddp-view" --help
+          python3 tests/smoke.py --binary "$BIN_DIR/media-proxy"
+          if [ "$REUSE" != true ]; then
+            tar -czf "dist/$ASSET" -C "$BIN_DIR" media-proxy ddp-view \
+              -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md \
+              vendor/image-webp/LICENSE-MIT vendor/image-webp/LICENSE-APACHE
+            (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.target }}
@@ -79,10 +114,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/* --clobber
+        run: |
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets"
+          mkdir -p "$RUNNER_TEMP/published-assets"
+          for FILE in dist/*; do
+            ASSET=$(basename "$FILE")
+            if grep -Fxq "$ASSET" "$RUNNER_TEMP/release-assets"; then
+              gh release download "$RELEASE_TAG" --pattern "$ASSET" --dir "$RUNNER_TEMP/published-assets"
+              cmp "$FILE" "$RUNNER_TEMP/published-assets/$ASSET"
+            else
+              gh release upload "$RELEASE_TAG" "$FILE"
+            fi
+          done
 
   notify-addon:
-    # Enable only after the add-on migration is merged; its old listener auto-merges.
+    # Enable only when the add-on consumes standalone release archives.
     if: github.event_name == 'release' && !github.event.release.prerelease && vars.ADDON_RELEASE_DISPATCH_ENABLED == 'true'
     needs: publish
     runs-on: ubuntu-latest
