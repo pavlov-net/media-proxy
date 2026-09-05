@@ -64,16 +64,18 @@ fast_image_resize = { version = "6", features = ["image"] }
 lcms2 = { version = "6", features = ["static"] }
 infer = { version = "0.22", default-features = false }
 
-# Media — Phase 2 (animated). `image-webp` master carries the canvas-corruption
-# fixes (#178 merged 2026-03-25, #179 merged 2026-04-06) that are not yet in
-# the crates.io 0.2.4 release — pin to a post-#179 main commit.
+# Animated WebP uses a narrow upstream fork for disposal fixes; provenance
+# and the two local changes are documented in vendor/image-webp/PATCHES.md.
 gif = "0.14"
 gif-dispose = "6"
 png = "0.18"
-image-webp = { git = "https://github.com/image-rs/image-webp", branch = "main" }
+image-webp = { path = "vendor/image-webp" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
 proptest = "1"

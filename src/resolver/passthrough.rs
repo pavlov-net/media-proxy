@@ -9,11 +9,12 @@ use crate::stream::url::classify;
 
 pub struct PassthroughLayer {
     inner: Box<dyn Resolver>,
+    user_agent: String,
 }
 
 impl PassthroughLayer {
-    pub fn new(inner: Box<dyn Resolver>) -> Self {
-        Self { inner }
+    pub fn new(inner: Box<dyn Resolver>, user_agent: String) -> Self {
+        Self { inner, user_agent }
     }
 }
 
@@ -28,6 +29,7 @@ impl Resolver for PassthroughLayer {
         if matches!(classify(&req.url), crate::stream::url::UrlKind::HttpUnknown)
             && let Ok(response) = crate::stream::http::CLIENT
                 .head(&req.url)
+                .header(reqwest::header::USER_AGENT, &self.user_agent)
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await

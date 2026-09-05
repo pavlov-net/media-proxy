@@ -77,16 +77,29 @@ def png_chunk(kind, data):
     return struct.pack('!I', len(data)) + kind + data + struct.pack('!I', zlib.crc32(kind + data))
 
 
-def png_data(image):
-    rows = image.tobytes()
-    return zlib.compress(b''.join(b'\0' + rows[i:i + image.width * 4] for i in range(0, len(rows), image.width * 4)))
+def png_data(image, depth=8, color_type=6):
+    samples = []
+    for r, g, b, a in image.get_flattened_data():
+        if color_type == 4:
+            assert r == g == b
+            samples.extend((r, a))
+        else:
+            samples.extend((r, g, b, a))
+    if depth == 16:
+        # Non-repeated bytes catch byte-order/STRIP_16 mistakes. The reference
+        # uses each sample's high byte, matching conversion to RGBA8.
+        rows = b''.join(struct.pack('!H', (v << 8) | (17 if 0 < v < 255 else v)) for v in samples)
+    else:
+        rows = bytes(samples)
+    stride = image.width * (2 if color_type == 4 else 4) * (depth // 8)
+    return zlib.compress(b''.join(b'\0' + rows[i:i + stride] for i in range(0, len(rows), stride)))
 
 
-def apng(frames, separate=False):
-    out = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('!II5B', W, H, 8, 6, 0, 0, 0))
+def apng(frames, separate=False, depth=8, color_type=6):
+    out = b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', struct.pack('!II5B', W, H, depth, color_type, 0, 0, 0))
     out += png_chunk(b'acTL', struct.pack('!II', len(frames), 0))
     if separate:
-        out += png_chunk(b'IDAT', png_data(rgba(W, H, BLUE)))
+        out += png_chunk(b'IDAT', png_data(rgba(W, H, BLUE), depth, color_type))
     seq = 0
     for i, f in enumerate(frames):
         im = f['image']
@@ -95,9 +108,9 @@ def apng(frames, separate=False):
         out += png_chunk(b'fcTL', ctl)
         seq += 1
         if i == 0 and not separate:
-            out += png_chunk(b'IDAT', png_data(im))
+            out += png_chunk(b'IDAT', png_data(im, depth, color_type))
         else:
-            out += png_chunk(b'fdAT', struct.pack('!I', seq) + png_data(im))
+            out += png_chunk(b'fdAT', struct.pack('!I', seq) + png_data(im, depth, color_type))
             seq += 1
     return out + png_chunk(b'IEND', b'')
 
@@ -107,12 +120,16 @@ def gif(frames):
     out = b'GIF89a' + struct.pack('<HHBBB', W, H, 0x81, 0, 0) + palette
     for f in frames:
         im = f['image']
+        colors = f.get('palette', [CLEAR, RED, GREEN, BLUE])
+        local_palette = 'palette' in f
         disposal = {'none': 1, 'background': 2, 'previous': 3}[f['dispose']]
-        out += b'!\xf9\x04' + struct.pack('<BHB', disposal * 4 + 1, f['delay'] // 10, 0) + b'\0'
-        out += b',' + struct.pack('<HHHHB', f['x'], f['y'], im.width, im.height, 0)
+        out += b'!\xf9\x04' + struct.pack('<BHB', disposal * 4 + 1, f['delay'] // 10, colors.index(CLEAR)) + b'\0'
+        out += b',' + struct.pack('<HHHHB', f['x'], f['y'], im.width, im.height, 0x81 if local_palette else 0)
+        if local_palette:
+            out += bytes(c for color in colors for c in color[:3])
         codes = []
         for pixel in im.get_flattened_data():
-            codes += [4, [CLEAR, RED, GREEN, BLUE].index(pixel)]
+            codes += [4, colors.index(pixel)]
         codes += [5]
         bits = sum(code << (i * 3) for i, code in enumerate(codes))
         encoded = bits.to_bytes((len(codes) * 3 + 7) // 8, 'little')
@@ -134,7 +151,7 @@ def webp(frames):
     for f in frames:
         im = f['image']
         buf = io.BytesIO()
-        im.save(buf, format='WEBP', lossless=True, exact=True)
+        im.save(buf, format='WEBP', lossless=not f.get('lossy', False), exact=True)
         chunks = buf.getvalue()[12:]
         flags = int(f['dispose'] == 'background') | (int(f['blend'] == 'source') << 1)
         header = (u24(f['x'] // 2) + u24(f['y'] // 2) + u24(im.width - 1) + u24(im.height - 1)
@@ -155,12 +172,48 @@ alpha = [frame(0, 0, rgba(W, H, CLEAR), blend='source', delay=40),
          frame(0, 0, rgba(2, 2, (0, 255, 0, 128))),
          frame(0, 0, rgba(2, 2, (0, 0, 255, 128)))]
 webp_frames = [dict(f, dispose='none' if f['dispose'] == 'previous' else f['dispose']) for f in opaque]
+webp_edges = [frame(0, 0, rgba(W, H, RED), blend='source'),
+              frame(2, 2, rgba(2, 2, BLUE), dispose='background'),
+              # A full-canvas OVER frame must only clear the previous rect.
+              frame(0, 0, rgba(W, H, CLEAR)),
+              frame(2, 2, rgba(2, 2, BLUE), dispose='background'),
+              # An opaque VP8 subframe must still dispose the previous rect.
+              dict(frame(4, 0, rgba(2, 2, (0, 0, 0, 255))), lossy=True)]
+
+
+def holes(color):
+    patch = rgba(2, 2, CLEAR)
+    patch.putpixel((0, 0), color)
+    patch.putpixel((1, 1), color)
+    return patch
+
+
+local_palette = [GREEN, BLUE, CLEAR, RED]  # Transparent index 2, not global index 0.
+gif_holes = [frame(0, 0, rgba(W, H, RED), blend='source'),
+             dict(frame(2, 2, holes(BLUE), dispose='previous'), palette=local_palette),
+             frame(4, 0, holes(GREEN), dispose='background'),
+             dict(frame(0, 0, holes(GREEN)), palette=local_palette),
+             frame(0, 0, rgba(W, H, CLEAR))]
+gray = [frame(0, 0, rgba(W, H, (64, 64, 64, 255)), blend='source'),
+        frame(2, 2, rgba(2, 2, (128, 128, 128, 128)), dispose='previous'),
+        frame(4, 0, rgba(2, 2, (192, 192, 192, 255)), dispose='background'),
+        frame(0, 0, rgba(W, H, CLEAR)),
+        frame(2, 2, rgba(2, 2, (32, 32, 32, 128)), blend='source')]
+rgba16 = [frame(0, 0, rgba(W, H, (64, 96, 192, 255)), blend='source'),
+          frame(2, 2, rgba(2, 2, (192, 64, 32, 128)), dispose='previous'),
+          frame(4, 0, rgba(2, 2, (32, 192, 64, 255)), dispose='background'),
+          frame(0, 0, rgba(W, H, CLEAR)),
+          frame(2, 2, rgba(2, 2, (96, 32, 192, 128)), blend='source')]
 fixtures = [('disposal.gif', gif(opaque), opaque, False),
             ('disposal.apng', apng(opaque), opaque, False),
             ('alpha.apng', apng(alpha), alpha, False),
             ('default-image.apng', apng(opaque, separate=True), opaque, True),
             ('disposal.webp', webp(webp_frames), webp_frames, False),
-            ('alpha.webp', webp(alpha), alpha, False)]
+            ('alpha.webp', webp(alpha), alpha, False),
+            ('disposal-edges.webp', webp(webp_edges), webp_edges, False),
+            ('palette-holes.gif', gif(gif_holes), gif_holes, False),
+            ('grayscale-alpha.apng', apng(gray, color_type=4), gray, False),
+            ('rgba16.apng', apng(rgba16, depth=16), rgba16, False)]
 for name, data, frames, separate in fixtures:
     (ROOT / name).write_bytes(data)
     expected = reference(frames)

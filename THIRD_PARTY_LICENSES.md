@@ -66,3 +66,10 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
+
+## image-webp
+
+The animated WebP decoder is vendored from image-rs/image-webp with two local
+disposal corrections. See `vendor/image-webp/PATCHES.md` for provenance. Its
+MIT and Apache-2.0 license texts are included in `vendor/image-webp/LICENSE-MIT`
+and `vendor/image-webp/LICENSE-APACHE`, including in standalone release archives.

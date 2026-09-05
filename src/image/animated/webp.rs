@@ -1,4 +1,4 @@
-//! Animated WebP via `image-webp` (git `main` pin for post-#179 fixes).
+//! Animated WebP via the vendored `image-webp` with disposal fixes.
 //!
 //! `WebPDecoder::read_frame` returns the already-composited canvas per frame,
 //! honoring disposal + blend from the VP8X/ANIM chunks.

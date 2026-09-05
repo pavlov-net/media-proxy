@@ -82,6 +82,13 @@ class WebSocket:
         self.sock.close()
 
 
+def receive_before(udp, deadline):
+    remaining = deadline - time.monotonic()
+    assert remaining > 0, 'DDP playback exceeded its deadline'
+    udp.settimeout(min(10, remaining))
+    return udp.recv(65535)
+
+
 def run(binary):
     with tempfile.TemporaryDirectory(prefix='media-proxy-smoke-') as temp:
         root = Path(temp)
@@ -102,6 +109,18 @@ def run(binary):
                     return str(root / 'clip.mp4')
                 return super().translate_path(path)
 
+            def do_HEAD(self):
+                if self.path == '/stream' and self.headers.get('User-Agent') != 'media-proxy-smoke/1':
+                    self.send_error(403)
+                    return
+                super().do_HEAD()
+
+            def do_GET(self):
+                if self.path == '/stream' and self.headers.get('User-Agent') != 'media-proxy-smoke/1':
+                    self.send_error(403)
+                    return
+                super().do_GET()
+
             def log_message(self, *args):
                 pass
 
@@ -109,7 +128,7 @@ def run(binary):
         threading.Thread(target=fixture.serve_forever, daemon=True).start()
         media_url = f'http://127.0.0.1:{fixture.server_port}'
         (root / 'watch.html').write_text('<html><title>Local video</title><video src="clip.mp4"></video></html>')
-        (root / 'config.yaml').write_text('hw:\n  prefer: none\nlog:\n  level: INFO\n')
+        (root / 'config.yaml').write_text('hw:\n  prefer: none\nlog:\n  level: INFO\nnet:\n  user_agent: media-proxy-smoke/1\n')
         with socket.socket() as reserve:
             reserve.bind(('127.0.0.1', 0))
             port = reserve.getsockname()[1]
@@ -180,11 +199,22 @@ def run(binary):
                             assert applied['loop'] is True and applied['fit'] == 'auto'
                             assert applied['fmt'] == 'rgb888' and applied['expand'] == 2
                             assert applied['pace'] == 0 and applied['ema'] == 0
-                            for _ in range(5):
-                                packet = udp.recv(65535)
+                            is_animation = source.endswith(('anim.gif', 'anim.png', 'anim.webp'))
+                            is_still = source.endswith(('red.png', 'wide.png'))
+                            # Fixtures contain 30 animation / 60 video frames.
+                            # Read past EOF to verify the default looping path.
+                            frames = 5 if is_still else 35 if is_animation else 65
+                            deadline = time.monotonic() + 15
+                            first_received = None
+                            for _ in range(frames):
+                                packet = receive_before(udp, deadline)
+                                if first_received is None:
+                                    first_received = time.monotonic()
                                 assert packet[3] == 9 and len(packet) == 778, (source, packet[:10])
                                 if source.endswith('wide.png'):
                                     assert packet[10:] == bytes(16 * 4 * 3) + b'\xff\0\0' * (16 * 8) + bytes(16 * 4 * 3)
+                            if not is_still:
+                                assert time.monotonic() - first_received >= (0.75 if is_animation else 1.5), 'frames emitted too quickly'
                             assert ws.request(dict(type='stop_stream', out=9))['type'] == 'ack'
                             udp.settimeout(0.2)
                             while True:
@@ -196,8 +226,9 @@ def run(binary):
                         response = ws.request(dict(type='start_stream', out=10, w=16, h=16,
                                                    src=str(root / 'anim.gif'), pace=30, ddp_port=udp.getsockname()[1]))
                         assert response['type'] == 'ack', response
-                        for _ in range(5):
-                            assert udp.recv(65535)[3] == 10
+                        deadline = time.monotonic() + 10
+                        for _ in range(35):
+                            assert receive_before(udp, deadline)[3] == 10
                         assert ws.request(dict(type='stop_stream', out=10))['type'] == 'ack'
                         udp.settimeout(0.2)
                         while True:
@@ -206,6 +237,13 @@ def run(binary):
                             except socket.timeout:
                                 break
                         udp.settimeout(10)
+                        response = ws.request(dict(type='start_stream', out=11, w=16, h=16,
+                                                   src=str(root / 'blue.png'), pace=1, loop=False,
+                                                   ddp_port=udp.getsockname()[1]))
+                        assert response['type'] == 'ack', response
+                        packet = udp.recv(65535)
+                        assert packet[3] == 11 and packet[10:] == b'\0\0\xff' * 256
+                        assert ws.request(dict(type='stop_stream', out=11))['type'] == 'ack'
                         response = ws.request(dict(type='start_stream', out=8, w=16, h=16, src=str(root / 'clip.mp4'),
                                                    loop=True, ddp_port=udp.getsockname()[1]))
                         assert response['type'] == 'ack', response

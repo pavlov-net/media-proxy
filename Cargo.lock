@@ -1228,8 +1228,6 @@ dependencies = [
 [[package]]
 name = "image-webp"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error 2.0.1",
@@ -1238,7 +1236,8 @@ dependencies = [
 [[package]]
 name = "image-webp"
 version = "0.2.4"
-source = "git+https://github.com/image-rs/image-webp?branch=main#f4d80bd965df2c81e65b6f43c1f70e0750bd4b0f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error 2.0.1",
@@ -1435,7 +1434,7 @@ dependencies = [
  "gif",
  "gif-dispose",
  "image",
- "image-webp 0.2.4 (git+https://github.com/image-rs/image-webp?branch=main)",
+ "image-webp 0.2.4",
  "infer",
  "lcms2",
  "parking_lot",
@@ -1444,6 +1443,7 @@ dependencies = [
  "proptest",
  "rand 0.10.2",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",

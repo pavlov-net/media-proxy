@@ -25,6 +25,10 @@ fn disposal_and_blending_match_independent_goldens() {
         "default-image.apng",
         "disposal.webp",
         "alpha.webp",
+        "disposal-edges.webp",
+        "palette-holes.gif",
+        "grayscale-alpha.apng",
+        "rgba16.apng",
     ] {
         let data = std::fs::read(root.join(name)).unwrap();
         let golden: Golden =

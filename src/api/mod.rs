@@ -81,5 +81,8 @@ fn build_resolver(config: &Arc<Config>) -> Result<Arc<dyn Resolver>> {
         info!("resolver: none (yt-dlp not on PATH and resolver.url unset; non-direct URLs will fail)");
         Box::new(NoopResolver)
     };
-    Ok(Arc::new(PassthroughLayer::new(inner)))
+    Ok(Arc::new(PassthroughLayer::new(
+        inner,
+        config.net.user_agent.clone(),
+    )))
 }

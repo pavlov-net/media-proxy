@@ -118,6 +118,7 @@ pub async fn run_paced(
     let tick = Duration::from_secs_f32(1.0 / pace_hz);
 
     let latest: Mutex<Option<Bytes>> = Mutex::new(None);
+    let first_emitted = tokio::sync::Notify::new();
 
     let producer = async {
         let mut source = source;
@@ -128,9 +129,16 @@ pub async fn run_paced(
                 Ok(Some(f)) => {
                     count += 1;
                     *latest.lock() = Some(f.rgb888);
+                    // A short, finite source can end before the sampler's
+                    // first tick. Do not report successful playback until
+                    // the first frame has actually reached the sink.
+                    if count == 1 {
+                        first_emitted.notified().await;
+                        deadline = time::Instant::now();
+                    }
                     // Decoders can produce much faster than playback. Keep
-                    // the producer on source cadence so the sampler sees each
-                    // frame, including the final frame of a finite source.
+                    // the producer on source cadence so sampling tracks
+                    // playback time.
                     deadline += Duration::from_secs_f32(f.delay_ms.max(10.0) / 1000.0);
                     let now = time::Instant::now();
                     if deadline + Duration::from_millis(100) < now {
@@ -197,6 +205,9 @@ pub async fn run_paced(
                     .await
                     .map_err(StreamError::Output)?;
                 seq = seq.wrapping_add(1);
+                if seq == 1 {
+                    first_emitted.notify_one();
+                }
             }
 
             next += tick;
@@ -408,6 +419,27 @@ mod tests {
             rgb888: Bytes::from(vec![0u8; n]),
             delay_ms: 33.0,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paced_finite_source_reaches_sink_before_source_completes() {
+        let (source, tx, completion) = test_video_source();
+        tokio::spawn(async move {
+            // Ensure the sampler starts before the only frame arrives.
+            // The source is shorter than its one-second sample interval.
+            time::sleep(Duration::from_millis(10)).await;
+            tx.send(rgb_frame(4 * 4 * 3)).await.unwrap();
+            completion.send(Ok(())).unwrap();
+        });
+        let sink = CountingSink::new(u32::MAX);
+        let mut fields = test_fields();
+        fields.pace = 1;
+        let count = time::timeout(Duration::from_secs(5), run_paced(source, &sink, &fields))
+            .await
+            .expect("finite playback must finish")
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(sink.sent.load(Ordering::Relaxed), 1);
     }
 
     /// Paced watchdog: source never produces a frame, watchdog must trip
