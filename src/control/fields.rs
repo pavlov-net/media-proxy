@@ -213,7 +213,10 @@ impl StreamFields {
             ddp_host,
             r#loop: req.r#loop.unwrap_or(defaults.playback.r#loop),
             expand: req.expand.unwrap_or(defaults.video.expand_mode),
-            hw: req.hw.unwrap_or(HwPref::Auto),
+            hw: req.hw.unwrap_or_else(|| {
+                serde_json::from_value(serde_json::Value::String(defaults.hw.prefer.to_ascii_lowercase()))
+                    .unwrap_or(HwPref::Auto)
+            }),
             fit,
             fmt,
             pace: req.pace.unwrap_or(0),

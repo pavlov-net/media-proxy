@@ -2,7 +2,7 @@
 name = "media-proxy"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98.1"
 license = "MIT"
 description = "WebSocket-controlled media proxy streaming to LED displays via DDP"
 repository = "https://github.com/stuartparmenter/media-proxy"
@@ -61,22 +61,19 @@ percent-encoding = "2"
 # features aren't needed here, and vendoring a Command spawn is ~50 LOC.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff"] }
 fast_image_resize = { version = "6", features = ["image"] }
-lcms2 = "6"
+lcms2 = { version = "6", features = ["static"] }
 infer = { version = "0.22", default-features = false }
 
-# Media — Phase 2 (animated). `image-webp` master carries the canvas-corruption
-# fixes (#178 merged 2026-03-25, #179 merged 2026-04-06) that are not yet in
-# the crates.io 0.2.4 release — pin to a post-#179 main commit.
 gif = "0.14"
 gif-dispose = "6"
 png = "0.18"
-image-webp = { git = "https://github.com/image-rs/image-webp", branch = "main" }
-
-# REST / animimg (Phase 1)
-zip = { version = "8", default-features = false, features = ["deflate"] }
+image-webp = "0.2.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
 proptest = "1"

@@ -15,31 +15,27 @@ jobs:
     environment: release-drafter
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the explicit release version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Fail on API errors; only a successful lookup can authorize a new draft.
+          gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | select(.draft == false) | .tag_name' > "$RUNNER_TEMP/media-proxy-published-tags"
+          if grep -Fxq -e "$VERSION" -e "v$VERSION" "$RUNNER_TEMP/media-proxy-published-tags"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7.7.0
-        id: drafter
+        if: steps.version.outputs.published == 'false'
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ secrets.RELEASE_TOKEN }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: "1.95"
-
-      - name: Install cargo-edit
-        run: cargo install --locked cargo-edit
-
-      - name: Bump Cargo.toml + Cargo.lock
-        run: cargo set-version ${{ steps.drafter.outputs.resolved_version }}
-
-      - name: Commit changes
-        run: |
-          if ! git diff --quiet; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git commit -am "Bump version to ${{ steps.drafter.outputs.resolved_version }}"
-            git push
-          fi
+          version: ${{ steps.version.outputs.version }}

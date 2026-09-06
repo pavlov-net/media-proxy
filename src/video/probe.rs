@@ -61,7 +61,7 @@ impl VideoProbeData {
 /// (binary missing, timeout, JSON parse, no video stream). Callers must
 /// be prepared to continue without source-side metadata.
 pub async fn probe_video_metadata(url: &str, headers: Option<&str>) -> Option<VideoProbeData> {
-    let raw = match time::timeout(PROBE_TIMEOUT, run_ffprobe(url, headers)).await {
+    let raw = match time::timeout(PROBE_TIMEOUT, run_ffprobe(Command::new("ffprobe"), url, headers)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             debug!(%url, error = %e, "ffprobe failed");
@@ -75,8 +75,7 @@ pub async fn probe_video_metadata(url: &str, headers: Option<&str>) -> Option<Vi
     parse_ffprobe(&raw)
 }
 
-async fn run_ffprobe(url: &str, headers: Option<&str>) -> Result<String, std::io::Error> {
-    let mut cmd = Command::new("ffprobe");
+async fn run_ffprobe(mut cmd: Command, url: &str, headers: Option<&str>) -> Result<String, std::io::Error> {
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -98,7 +97,8 @@ async fn run_ffprobe(url: &str, headers: Option<&str>) -> Result<String, std::io
     cmd.arg("-i").arg(url);
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
 
     let out = cmd.output().await?;
     if !out.status.success() {
@@ -200,6 +200,66 @@ fn normalise_rotation(deg: f64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod cancellation {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct ProbeCleanup(rustix::process::Pid);
+
+        impl Drop for ProbeCleanup {
+            fn drop(&mut self) {
+                let _ = rustix::process::kill_process(self.0, rustix::process::Signal::KILL);
+            }
+        }
+
+        #[tokio::test]
+        async fn deadline_and_cancellation_reap_probe() {
+            for cancel in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let bin = dir.path().join("ffprobe");
+                let pid_file = bin.with_extension("pid");
+                std::fs::write(&bin, "#!/bin/sh\necho $$ > \"$0.pid\"\nexec sleep 30\n").unwrap();
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let timeout = Duration::from_millis(if cancel { 30_000 } else { 300 });
+                let task = tokio::spawn(async move {
+                    time::timeout(
+                        timeout,
+                        run_ffprobe(Command::new(bin), "rtsp://camera/live", None),
+                    )
+                    .await
+                });
+                let probe = time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Ok(text) = tokio::fs::read_to_string(&pid_file).await
+                            && let Ok(pid) = text.trim().parse::<i32>()
+                            && let Some(pid) = rustix::process::Pid::from_raw(pid)
+                        {
+                            break ProbeCleanup(pid);
+                        }
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("probe must start");
+
+                if cancel {
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                } else {
+                    assert!(task.await.unwrap().is_err(), "probe must exceed its deadline");
+                }
+                time::timeout(Duration::from_secs(2), async {
+                    while rustix::process::test_kill_process(probe.0) != Err(rustix::io::Errno::SRCH) {
+                        time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("cancelled or timed-out ffprobe must be killed and reaped");
+            }
+        }
+    }
 
     #[test]
     fn parses_basic_stream() {

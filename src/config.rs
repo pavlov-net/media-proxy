@@ -325,8 +325,8 @@ impl Default for PlaybackStillConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResolverConfig {
-    /// URL of the addon-side resolver. When unset, resolver requests fail
-    /// closed (used in tests with the fake resolver).
+    /// Optional external resolver URL. When unset, detect yt-dlp on PATH;
+    /// direct media works even when neither resolver is available.
     pub url: Option<String>,
     #[serde(default = "default_resolver_timeout")]
     pub timeout_ms: u64,
@@ -384,12 +384,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_yaml_merges_nested_defaults_and_uppercase_logging() {
+        let mut file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        use std::io::Write;
+        write!(file, "hw:\n  prefer: none\nyoutube:\n  60fps: false\nimage:\n  unsharp:\n    amount: 0.5\nlog:\n  level: WARNING\n").unwrap();
+        let config = Config::load(Some(file.path())).unwrap();
+        assert!(!config.youtube.prefer_60fps);
+        assert_eq!(config.log.level, LogLevel::Warning);
+        assert_eq!(config.image.unsharp.amount, 0.5);
+        assert_eq!(config.image.unsharp.radius, 0.6);
+        assert_eq!(config.hw.prefer, "none");
+    }
+
+    #[test]
     fn defaults_are_stable() {
         let c = Config::default();
         assert_eq!(c.hw.prefer, "auto");
         assert_eq!(c.video.expand_mode, 2);
         assert_eq!(c.video.fit, "auto");
         assert!(!c.video.autocrop.enabled);
+        assert_eq!(c.video.autocrop.probe_frames, 24);
+        assert_eq!(c.video.autocrop.luma_thresh, 16);
+        assert_eq!(c.video.autocrop.max_bar_ratio, 0.15);
+        assert_eq!(c.video.autocrop.min_bar_px, 2);
         assert!(c.playback.r#loop);
         assert!(c.youtube.prefer_60fps);
         assert!(c.youtube.cache.enabled);
@@ -397,12 +414,24 @@ mod tests {
         assert_eq!(c.image.method, "lanczos");
         assert!(!c.image.gamma_correct);
         assert!(c.image.color_correction);
+        assert_eq!(c.image.unsharp.amount, 0.0);
+        assert_eq!(c.image.unsharp.radius, 0.6);
+        assert_eq!(c.image.unsharp.threshold, 2);
         assert_eq!(c.image.frame_cache_mb, 32);
         assert_eq!(c.image.frame_cache_min_frames, 5);
+        assert!(!c.log.send_ms);
+        assert_eq!(c.log.level, LogLevel::Info);
+        assert!(c.log.metrics);
         assert_eq!(c.log.rate_ms, 5000);
         assert!(c.net.win_timer_res);
         assert!(c.net.spread_packets);
         assert_eq!(c.net.spread_max_fps, 60);
+        assert_eq!(c.net.spread_min_ms, 3.0);
+        assert_eq!(c.net.spread_max_sleeps, 0);
+        assert_eq!(
+            c.net.user_agent,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        );
         assert_eq!(c.playback_still.redundancy, 3);
         assert!(c.resolver.url.is_none());
         assert_eq!(c.resolver.timeout_ms, 30_000);

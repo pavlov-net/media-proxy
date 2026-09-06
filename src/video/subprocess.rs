@@ -90,8 +90,10 @@ pub(crate) fn add_http_reconnect_args(cmd: &mut Command, rw_timeout: Duration, d
         .arg("1")
         .arg("-reconnect_streamed")
         .arg("1")
-        .arg("-reconnect_at_eof")
-        .arg("1")
+        // Normal EOF must reach the decoder: reconnecting at every EOF
+        // stalls finite HTTP files and prevents their looping/seek path.
+        // Live inputs that close cleanly are rebuilt by the orchestrator
+        // when loop=true; read errors still use ffmpeg's reconnect flags.
         .arg("-reconnect_delay_max")
         .arg(&delay)
         .arg("-rw_timeout")
