@@ -62,6 +62,9 @@ cargo build --locked --release
 Use `ddp-view --help` to configure a terminal DDP receiver for testing without a
 physical display.
 
+Animated WebP files that clear a frame before drawing the next can retain ghost
+pixels because of disposal bugs in the upstream decoder.
+
 ## Run checks
 
 ```sh
