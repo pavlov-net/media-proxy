@@ -89,8 +89,7 @@ jobs:
           python3 tests/smoke.py --binary "$BIN_DIR/media-proxy"
           if [ "$REUSE" != true ]; then
             tar -czf "dist/$ASSET" -C "$BIN_DIR" media-proxy ddp-view \
-              -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md \
-              vendor/image-webp/LICENSE-MIT vendor/image-webp/LICENSE-APACHE
+              -C "$GITHUB_WORKSPACE" LICENSE THIRD_PARTY_LICENSES.md README.md
             (cd dist && sha256sum "$ASSET" > "$ASSET.sha256")
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
