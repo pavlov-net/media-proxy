@@ -1,8 +1,4 @@
-//! Output sinks. DDP is the only sink at present; new protocols slot in
-//! alongside it.
-//!
-//! Conflict addressing is a *sink* concern: each sink implementation owns
-//! its own collision rules via `reserve`.
+//! Frame sinks and metrics. DDP address reservations enforce stream exclusivity.
 
 pub mod ddp;
 pub mod metrics;

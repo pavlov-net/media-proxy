@@ -1,10 +1,10 @@
-//! BBCode → pixel-font rendering.
+//! BBCode -> pixel-font rendering.
 //!
 //! Supported tags:
-//! - `[color=red]…[/color]` or `[red]…[/red]` — text color
-//! - `[font=8x16]…[/font]` — Spleen font size
-//! - `[left]` / `[center]` / `[right]` — block alignment for following lines
-//! - `[b]…[/b]` — bold (simulated via double-draw)
+//! - `[color=red]...[/color]` or `[red]...[/red]`; text color
+//! - `[font=8x16]...[/font]`; Spleen font size
+//! - `[left]` / `[center]` / `[right]`; block alignment for following lines
+//! - `[b]...[/b]`; bold (simulated via double-draw)
 
 use crate::error::RenderError;
 use crate::render::blit::{Canvas, blit_string};
@@ -34,7 +34,7 @@ pub struct RenderOutput {
     pub height: u32,
 }
 
-/// Render `text` (possibly containing BBCode tags) into a `width`×`height`
+/// Renders `text` (possibly containing BBCode tags) into a `width`x`height`
 /// RGB888 buffer.
 pub fn render_bbcode_text(
     text: &str,
@@ -68,7 +68,7 @@ pub fn render_bbcode_text(
             };
             blit_string(&mut canvas, font, line, x, cursor_y, run.color);
             if run.bold {
-                // Double-draw one pixel to the right for a fake bold.
+                // Simulate bold with a second draw shifted one pixel right.
                 blit_string(&mut canvas, font, line, x + 1, cursor_y, run.color);
             }
             cursor_y += line_h;
@@ -82,9 +82,8 @@ pub fn render_bbcode_text(
     })
 }
 
-// The Python renderer groups style segments until a newline or alignment
-// change, then uses the first segment's style for that line. Preserve this
-// layout: an inline color/font tag must not move the remaining text down.
+// Newlines and alignment changes delimit rows. The first segment supplies
+// the row style; inline color/font changes do not start a row.
 fn logical_lines(runs: Vec<Run>) -> Vec<Run> {
     let mut lines = Vec::new();
     let mut current: Option<Run> = None;
@@ -116,8 +115,7 @@ fn build_background(width: u32, height: u32, bg: [u8; 3]) -> Vec<u8> {
     if bg == [0, 0, 0] {
         return vec![0u8; total];
     }
-    // Build one row, then double-up via `extend_from_within` so we copy O(log
-    // height) times instead of O(height) per-pixel `extend_from_slice` calls.
+    // Doubling the initialized rows copies the solid background in logarithmic steps.
     let row_len = (width as usize) * 3;
     let mut canvas = Vec::with_capacity(total);
     for _ in 0..width {
@@ -138,12 +136,9 @@ fn build_background(width: u32, height: u32, bg: [u8; 3]) -> Vec<u8> {
 }
 
 fn parse(text: &str, default_fg: [u8; 3]) -> Vec<Run> {
-    // Stateful parser over `[tag=value]...[/tag]`. Unknown tags fall through
-    // as literal text. All state lives in `Parser` so helpers can mutate it.
+    // Unknown tags remain literal text.
     let mut p = Parser {
         color_stack: vec![default_fg],
-        // Default to 5x8 — matches the Python baseline and the LED sizes
-        // callers typically target. `[font=8x16]` opts up explicitly.
         font_stack: vec![FontSize::S5x8],
         bold_stack: vec![false],
         align_stack: vec![Alignment::Left],
@@ -199,9 +194,7 @@ impl Parser {
         *self.align_stack.last().unwrap_or(&Alignment::Left)
     }
 
-    /// Drain the pending text into the runs vector, merging with the
-    /// previous run when all style/align attributes match so the renderer
-    /// doesn't re-enter the wrap path unnecessarily.
+    /// Merges adjacent runs with identical style to avoid separate wrap operations.
     fn flush(&mut self) {
         if self.buf.is_empty() {
             return;
@@ -231,8 +224,7 @@ impl Parser {
         });
     }
 
-    /// Handle one `[tag]` or `[tag=value]` (or `[/tag]`). Returns `true`
-    /// on recognition.
+    /// Returns whether the tag is recognized and updates parser state.
     fn try_tag(&mut self, body: &str) -> bool {
         let (name, value) = match body.split_once('=') {
             Some((n, v)) => (n, Some(v)),
@@ -305,7 +297,7 @@ impl Parser {
     }
 }
 
-/// Pop but never empty — BBCode stacks keep their root default entry.
+/// Pops only non-root entries so BBCode stacks retain their defaults.
 fn pop_if<T>(stack: &mut Vec<T>) {
     if stack.len() > 1 {
         stack.pop();
@@ -324,7 +316,6 @@ mod tests {
         assert_eq!(out.width, 64);
         assert_eq!(out.height, 16);
         assert_eq!(out.rgb888.len(), (64 * 16 * 3) as usize);
-        // Has at least one white pixel from the glyph blitter.
         assert!(
             out.rgb888
                 .as_chunks::<3>()
@@ -337,7 +328,6 @@ mod tests {
     #[test]
     fn bbcode_color_tag_recognized() {
         let out = render_bbcode_text("[red]x[/red]", 16, 16, [255, 255, 255], [0, 0, 0]).unwrap();
-        // Some red pixels should be present.
         assert!(
             out.rgb888
                 .as_chunks::<3>()
@@ -360,9 +350,8 @@ mod tests {
 
     #[test]
     fn unknown_tag_falls_through_literally() {
-        // `[img]` isn't a recognized tag — render as text.
+        // `[img]` isn't a recognized tag; render as text.
         let out = render_bbcode_text("[img]", 64, 16, [255, 255, 255], [0, 0, 0]).unwrap();
-        // Any white pixel means something was rendered (the literal `[img]`).
         assert!(
             out.rgb888
                 .as_chunks::<3>()

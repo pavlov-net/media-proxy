@@ -1,4 +1,4 @@
-//! Wire-level control protocol — serde types for the JSON messages.
+//! JSON control messages and serialization.
 //! Message shapes: `hello`, `start_stream`, `stop_stream`, `update`, `ping`.
 
 use serde::{Deserialize, Serialize};
@@ -44,23 +44,18 @@ pub struct ErrorMsg {
     pub message: String,
 }
 
-/// Free-form start/update payloads come in with arbitrary extra keys (future
-/// fields, per-client experiments). `StartStream`/`UpdateStream` capture the
-/// known fields but we also keep the raw JSON for cases that need it.
+/// Parses a control message, ignoring unknown fields.
 pub fn parse_client_msg(raw: &str) -> serde_json::Result<ClientMsg> {
     serde_json::from_str(raw)
 }
 
 pub fn serialize_server_msg(msg: &ServerMsg) -> String {
     serde_json::to_string(msg).unwrap_or_else(|e| {
-        // Can't encode a JSON error payload as JSON? At this point the best
-        // we can do is send a minimal inline error literal.
+        // Keep a wire error response available if serialization fails.
         format!(r#"{{"type":"error","code":"server_error","message":"{}"}}"#, e)
     })
 }
 
-/// Retained for future compatibility checks: `start_stream` responses echo
-/// back the `applied` map, which surfaces server-resolved values (`hw=auto`
-/// → concrete backend, etc.).
+/// JSON object type for untyped protocol fields.
 #[allow(dead_code)]
 pub type RawMap = serde_json::Map<String, Value>;

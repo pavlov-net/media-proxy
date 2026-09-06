@@ -2,9 +2,9 @@
 //!
 //! Header layout (big-endian, 10 bytes total):
 //! ```text
-//! offset 0: flags    u8   0x40 = header present, 0x01 = PUSH (end-of-frame)
+//! offset 0: flags    u8   0x40 = version 1, 0x01 = PUSH (end-of-frame)
 //! offset 1: seq      u8   sequence 1..=15 (never 0, never >15)
-//! offset 2: cfg      u8   pixel config — 0x0B=RGB888, 0x61=RGB565_BE, 0x62=RGB565_LE
+//! offset 2: cfg      u8   pixel config; 0x0B=RGB888, 0x61=RGB565_BE, 0x62=RGB565_LE
 //! offset 3: out_id   u8   destination output/canvas id
 //! offset 4: offset   u32  byte offset within frame buffer
 //! offset 8: length   u16  payload bytes in this packet
@@ -54,16 +54,13 @@ impl DdpHeader {
     }
 }
 
-/// DDP sequence numbers wrap 1..=15 (0 is reserved).
-/// `next_sequence(current)` returns the next value to use.
+/// Returns the next sequence number in 1..=15; zero is reserved.
 #[inline]
 pub fn next_sequence(current: u8) -> u8 {
     (current % 15) + 1
 }
 
-/// Stateful packet encoder. Writes each packet into a caller-owned buffer so
-/// the sender can reuse a single allocation across all packets of a frame
-/// (and across frames).
+/// Encodes packets into a reusable caller-owned buffer.
 pub struct PacketEncoder<'a> {
     payload: &'a [u8],
     output_id: u8,
@@ -83,17 +80,13 @@ impl<'a> PacketEncoder<'a> {
         }
     }
 
-    /// Sequence value the next emitted packet would carry. After the last
-    /// packet has been emitted, this is the sequence the *next* frame should
-    /// start with.
+    /// Returns the sequence to use for the next packet, including across frame boundaries.
     pub fn current_seq(&self) -> u8 {
         self.seq
     }
 
-    /// Write the next packet into `buf` (cleared first). Returns `Some(len)`
-    /// where `len` is the bytes written to `buf`, or `None` when the payload
-    /// has been fully drained. `buf` must have capacity
-    /// `DDP_HEADER_LEN + DDP_MAX_DATA`.
+    /// Clears `buf` and writes the next packet, returning its length or `None`
+    /// when exhausted. Preallocating header plus maximum payload avoids growth.
     pub fn encode_next(&mut self, buf: &mut BytesMut) -> Option<usize> {
         if self.offset >= self.payload.len() {
             return None;
@@ -182,7 +175,7 @@ mod tests {
 
     #[test]
     fn multi_packet_only_last_has_push() {
-        // 1441 bytes → 2 packets (1440 + 1)
+        // 1441 bytes -> 2 packets (1440 + 1)
         let payload = vec![0u8; DDP_MAX_DATA + 1];
         let packets = collect_packets(&payload, 1);
         assert_eq!(packets.len(), 2);

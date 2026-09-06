@@ -1,5 +1,4 @@
-//! Layered error taxonomy. Each subsystem owns its own `thiserror` enum,
-//! converted into this top-level `Error` via `#[from]`.
+//! Subsystem errors and conversions to the top-level `Error`.
 
 use thiserror::Error;
 
@@ -56,10 +55,8 @@ impl From<figment::Error> for ConfigError {
     }
 }
 
-/// Media-layer error taxonomy, library-agnostic.
-///
-/// `retryable` indicates whether the caller's retry loop should attempt again.
-/// `source_url` carries the input URL so logs/errors can identify the stream.
+/// Media errors independent of the decoder or transport library.
+/// `retryable` controls retry eligibility; `source_url` identifies the input.
 #[derive(Debug, Error)]
 pub enum MediaError {
     #[error("network error ({source_url}): {message}")]
@@ -161,16 +158,8 @@ pub enum ResolverError {
 }
 
 impl ResolverError {
-    /// Resolver-time errors are never retried by the orchestrator. This
-    /// matches the Python reference: `yt_dlp.DownloadError`, spawn
-    /// failures, JSON parse errors, and HTTP timeouts during resolution
-    /// all surface immediately. Streaming-time network errors that *can*
-    /// be retried flow through `MediaError::Network::retryable` after
-    /// resolution has already succeeded — they don't come back through
-    /// this enum.
-    ///
-    /// Kept as a method (rather than a flat `false` in the orchestrator)
-    /// so future per-variant selectivity has an obvious extension point.
+    /// Returns false: resolution failures surface immediately. Retryable errors
+    /// after resolution use `MediaError::Network` or `MediaError::Decode`.
     pub fn is_retryable(&self) -> bool {
         false
     }

@@ -1,4 +1,4 @@
-//! Layered configuration via `figment`: defaults → file (yaml/toml/json) → env → runtime.
+//! Configuration precedence: defaults, optional YAML/TOML/JSON file, then environment.
 
 use std::path::Path;
 
@@ -53,7 +53,8 @@ impl Default for HwConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VideoConfig {
-    /// 0=never, 1=auto(limited→full), 2=force
+    /// Range expansion: 0 uses ffmpeg defaults, 1 maps auto-detected input to full,
+    /// and 2 maps limited input to full.
     #[serde(default = "default_expand_mode")]
     pub expand_mode: u8,
     #[serde(default = "default_fit")]
@@ -178,10 +179,10 @@ pub struct ImageConfig {
     pub color_correction: bool,
     #[serde(default)]
     pub unsharp: UnsharpConfig,
-    /// Max memory for cached frames (MB, 0 = disabled)
+    /// Shared animation-cache budget in MiB; zero disables cache retention.
     #[serde(default = "default_frame_cache_mb")]
     pub frame_cache_mb: u32,
-    /// Only cache if animation has ≥ N frames
+    /// Minimum frame count for retaining a sequence in the shared cache.
     #[serde(default = "default_frame_cache_min_frames")]
     pub frame_cache_min_frames: u32,
 }
@@ -239,6 +240,7 @@ impl Default for UnsharpConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogConfig {
     #[serde(default)]
+    /// Accepted for configuration compatibility; has no runtime effect.
     pub send_ms: bool,
     #[serde(default = "default_log_rate_ms")]
     pub rate_ms: u64,
@@ -306,7 +308,7 @@ impl Default for NetConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlaybackStillConfig {
-    /// Send each packet this many times for reliability on still frames.
+    /// Packet copies for the first native-cadence frame when looping is disabled.
     #[serde(default = "default_redundancy")]
     pub redundancy: u32,
 }
@@ -342,9 +344,7 @@ impl Default for ResolverConfig {
 }
 
 fn default_resolver_timeout() -> u64 {
-    // Cold-start budget: Python interpreter (~300ms) + yt-dlp imports
-    // (~500ms) + Deno spawn (~1s) + youtubei API + EJS solve (~2-4s).
-    // Warm runs land near 2s; first call after install can be 5-10s.
+    // Allows interpreter startup, extraction, and JavaScript challenge solving.
     30_000
 }
 
@@ -353,7 +353,8 @@ fn default_true() -> bool {
 }
 
 impl Config {
-    /// Load configuration with defaults → optional file → env (`MEDIA_PROXY__*`) overlay.
+    /// Loads defaults, an optional file, then `MEDIA_PROXY__` environment overrides.
+    /// Unsupported file extensions and invalid values return an error.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut fig = Figment::from(Serialized::defaults(Self::default()));
 

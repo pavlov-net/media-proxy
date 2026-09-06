@@ -1,14 +1,10 @@
-//! Rolling-window metrics: frame/packet rate, jitter, queue occupancy.
-//!
-//! One `RateMeter` per metric, logged every `log_interval`.
+//! Rolling event rates and inter-batch timing jitter.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Each entry is `(timestamp, count)` so callers can record a batch of
-/// events that share an `Instant` (e.g. all DDP packets from one frame)
-/// without allocating an entry per event. Rate sums counts; jitter still
-/// reads inter-batch timestamps only.
+/// Stores one timestamp per event batch. Rates count events; jitter measures
+/// intervals between batches, avoiding an allocation for every event.
 pub struct RateMeter {
     window: Duration,
     ts: VecDeque<(Instant, u32)>,
@@ -26,8 +22,7 @@ impl RateMeter {
         self.tick_n(t, 1);
     }
 
-    /// Record `count` events that all happened at `t`. Stored as a single
-    /// entry — keeps the deque bounded by emit cadence, not by event count.
+    /// Records a batch at `t` and evicts expired entries. A zero count is ignored.
     pub fn tick_n(&mut self, t: Instant, count: u32) {
         if count == 0 {
             return;
@@ -64,7 +59,7 @@ impl RateMeter {
         if self.ts.len() < 3 {
             return 0.0;
         }
-        // Welford's online variance — single pass, no Vec alloc.
+        // Welford's online variance; single pass, no Vec alloc.
         let mut n: u64 = 0;
         let mut mean = 0.0f64;
         let mut m2 = 0.0f64;
@@ -105,7 +100,7 @@ mod tests {
         for i in 0..10 {
             m.tick(t0 + Duration::from_millis(i * 100));
         }
-        // 10 ticks over 900ms → ~10Hz
+        // 10 ticks over 900ms -> ~10Hz
         let r = m.rate_hz();
         assert!(r > 9.0 && r < 11.0, "rate was {r}");
     }
@@ -123,7 +118,7 @@ mod tests {
                 unitary.tick(t);
             }
         }
-        // Both meters see 1000 events across 900ms — rates must match.
+        // Both meters see 1000 events across 900ms; rates must match.
         assert!((batched.rate_hz() - unitary.rate_hz()).abs() < 1e-6);
     }
 }

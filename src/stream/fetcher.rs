@@ -1,6 +1,4 @@
-//! HTTP / file:// → bytes. Shared by static-image and animated paths.
-//!
-//! Enforces the 50 MB cap from [`MAX_SIZE_LIMIT`].
+//! Reads local and HTTP image data, enforcing [`MAX_SIZE_LIMIT`] for decoding.
 
 use std::path::Path;
 use std::time::Duration;
@@ -68,9 +66,7 @@ async fn fetch_http(src_url: &str, user_agent: &str) -> Result<Vec<u8>, ImageErr
         });
     }
 
-    // Stream the body chunk-by-chunk so a server that lies about (or omits)
-    // Content-Length can't push past our cap — the trailing byte check
-    // alone would already have buffered MAX_SIZE_LIMIT + overflow first.
+    // Enforce the byte limit while reading; Content-Length can be absent or wrong.
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(MEMORY_THRESHOLD);
     while let Some(chunk) = stream.next().await {

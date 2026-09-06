@@ -1,6 +1,5 @@
-//! Fail-closed resolver. Used when neither a local `yt-dlp` nor an HTTP
-//! resolver sidecar is configured. Direct-media URLs still work because
-//! [`super::PassthroughLayer`] short-circuits them before reaching here.
+//! Rejects extraction requests when no resolver is configured.
+//! [`super::PassthroughLayer`] handles direct media before this resolver.
 
 use async_trait::async_trait;
 

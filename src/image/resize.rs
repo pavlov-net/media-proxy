@@ -1,7 +1,4 @@
-//! Image resize with `fast_image_resize` 6.x.
-//!
-//! Implements LANCZOS/BICUBIC/BILINEAR/BOX/NEAREST plus AUTO (scale-dependent,
-//! integer-ratio aware).
+//! Image resizing and black-background compositing with `fast_image_resize`.
 
 use fast_image_resize::PixelType;
 use fast_image_resize::images::{Image, ImageRef};
@@ -44,11 +41,8 @@ impl ResampleMethod {
     }
 }
 
-/// Pick the resize algorithm for AUTO based on scale + integer-ratio detection.
-///
-/// Upscales stay crisp via Nearest; modest downscales with a near-integer
-/// pixel ratio also pick Nearest so pixel-art survives (LED-art friendly);
-/// everything else uses Box for anti-aliased downscales.
+/// Selects Nearest for upscaling and near-integer downscales of at most 2x
+/// to preserve pixel-art edges. Other downscales use Box filtering.
 fn auto_alg(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> ResizeAlg {
     if src_w == 0 || src_h == 0 {
         return ResizeAlg::Nearest;
@@ -79,10 +73,8 @@ fn alg_for(method: ResampleMethod, src_w: u32, src_h: u32, dst_w: u32, dst_h: u3
     }
 }
 
-/// Compute `(new_w, new_h)` for a given fit mode and target size.
-///
-/// `Pad` and `Cover` scale to fit / fill respectively. `Auto` scales directly
-/// when aspect ratios match (within 1%), else falls back to `Pad`.
+/// Computes dimensions for fit or fill. `Auto` uses the target dimensions
+/// when the absolute aspect-ratio difference is below 0.01, otherwise `Pad`.
 pub fn compute_fit_size(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, fit: Fit) -> (u32, u32) {
     if src_w == 0 || src_h == 0 {
         return (dst_w.max(1), dst_h.max(1));
@@ -106,7 +98,7 @@ pub fn compute_fit_size(src_w: u32, src_h: u32, dst_w: u32, dst_h: u32, fit: Fit
     (new_w, new_h)
 }
 
-/// Resize an RGBA source into a new RGBA buffer at `(dst_w, dst_h)`.
+/// Resizes an RGBA source into a new RGBA buffer at `(dst_w, dst_h)`.
 pub fn resize_rgba(
     src: &[u8],
     src_w: u32,
@@ -127,8 +119,7 @@ pub fn resize_rgba(
     Ok(dst_image.into_vec())
 }
 
-/// Resize a 4-channel u16-per-channel image. Used by the gamma-aware path —
-/// one resize call instead of four single-channel passes.
+/// Resizes four-channel u16 data for the gamma-aware pipeline.
 pub fn resize_u16x4(
     src: &[u16],
     src_w: u32,
@@ -158,14 +149,8 @@ pub struct CompositePlan {
     pub target: (u32, u32),
 }
 
-/// Composite an RGBA source onto a black `target` canvas. `src_off` picks the
-/// top-left corner in the source (positive for center-crop / `Cover`);
-/// `dst_off` picks where in the target canvas the region lands (positive for
-/// letterbox / `Pad`).
-///
-/// Walks row-by-row to avoid per-pixel index math, with a fast path when the
-/// inner rect already fills the target (no letterbox margins, no center-crop
-/// offsets) — the common case after a `compute_fit_size` resize.
+/// Composites RGBA onto black RGB888. `src_off` selects the source rectangle;
+/// `dst_off` positions it in the target. Both rectangles must be in bounds.
 pub fn composite_rgba_to_rgb888(rgba: &[u8], plan: &CompositePlan) -> Vec<u8> {
     let (target_w, target_h) = plan.target;
     let (copy_w, copy_h) = plan.copy;
@@ -187,8 +172,7 @@ pub fn composite_rgba_to_rgb888(rgba: &[u8], plan: &CompositePlan) -> Vec<u8> {
     out
 }
 
-/// Walk one row of RGBA → RGB888, blending each pixel against a black
-/// background. Hot path for opaque sources is a 3-byte copy per pixel.
+/// Flattens straight-alpha RGBA over black; opaque pixels retain their RGB.
 fn composite_row_over_black(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len() % 4, 0);
     debug_assert_eq!(dst.len(), src.len() / 4 * 3);
@@ -216,7 +200,7 @@ fn composite_row_over_black(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Letterbox a smaller RGBA image onto a `target_w × target_h` black canvas.
+/// Letterboxes a smaller RGBA image onto a `target_w x target_h` black canvas.
 pub fn letterbox_rgba_to_rgb888(
     rgba: &[u8],
     inner_w: u32,
@@ -240,7 +224,7 @@ pub fn letterbox_rgba_to_rgb888(
     )
 }
 
-/// Center-crop a larger RGBA image into a `target_w × target_h` canvas.
+/// Center-crops a larger RGBA image into a `target_w x target_h` canvas.
 pub fn cover_rgba_to_rgb888(
     rgba: &[u8],
     inner_w: u32,

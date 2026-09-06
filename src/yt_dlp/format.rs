@@ -1,8 +1,5 @@
-//! yt-dlp `-f` format-selector builder. Pure string assembly from target
-//! height, hwaccel hint, and 60fps preference. Always prefers video-only
-//! progressive HTTPS streams; falls through to combined / any protocol only
-//! as last resort. Tiny displays are capped — pulling 1080p to render at
-//! 64×64 wastes bandwidth.
+//! Builds yt-dlp format preferences from target height and available hardware.
+//! The 720p/60fps preference precedes size-based tiers; final fallbacks have no height cap.
 
 use crate::platform::HwBackend;
 
@@ -56,7 +53,7 @@ fn resolution_ladder(target: u32) -> &'static [u32] {
     }
 }
 
-/// Append a `bv*[…]` arm and (when not video-only) the matching `b[…]` arm.
+/// Appends a video-containing selection arm and optional combined-format fallback.
 fn push_pair(comps: &mut Vec<String>, video_only: bool, body: &str) {
     comps.push(format!("bv*{body}"));
     if !video_only {
@@ -71,8 +68,7 @@ pub fn build_format(p: &FormatParams) -> String {
     let max_h = max_height_for(p.height);
     let ladder = resolution_ladder(p.height);
     let resolutions: Vec<u32> = ladder.iter().copied().filter(|r| *r <= max_h).collect();
-    // Tiny targets can fully filter the ladder; fall back to one tier so the
-    // selector always has at least one resolution-pinned arm.
+    // Preserve one resolution tier when the target cap excludes the entire ladder.
     let resolutions = if resolutions.is_empty() {
         vec![240]
     } else {
@@ -82,8 +78,7 @@ pub fn build_format(p: &FormatParams) -> String {
     let mut comps: Vec<String> = Vec::new();
 
     if p.prefer_60fps {
-        // 60fps streams only exist at ≥720p on YouTube — pin to 720 regardless
-        // of the target height.
+        // Prefer 720p/60fps before resolution tiers, even for small targets.
         for codec in codecs {
             push_pair(
                 &mut comps,
@@ -129,8 +124,7 @@ pub fn build_format(p: &FormatParams) -> String {
         comps.push("b[protocol=https]".to_string());
     }
 
-    // Final any-protocol fallbacks — for live streams and DASH/HLS edge cases
-    // where no https progressive format exists.
+    // Live and segmented streams can lack a progressive HTTPS format.
     comps.push("bv*".to_string());
     if !p.video_only {
         comps.push("b".to_string());

@@ -1,5 +1,4 @@
-//! DDP UDP sender. Owns the socket; the collision registry gates whether a
-//! sender ever comes into existence for a given key.
+//! UDP frame output with DDP address reservations managed by the registry.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -21,8 +20,7 @@ use crate::output::ddp::spreading::{self, SpreadConfig};
 use crate::output::metrics::RateMeter;
 use crate::output::sink::{Frame, OutputSink, PixelFormat};
 
-/// Per-stream DDP sender. One socket, bound to an ephemeral port, shared
-/// across the stream's lifetime.
+/// Per-stream UDP sender bound to an ephemeral local port.
 pub struct DdpSender {
     socket: Arc<UdpSocket>,
     dest: SocketAddr,
@@ -33,9 +31,7 @@ pub struct DdpSender {
     pace_hz: u32,
     metrics: Option<Mutex<Metrics>>,
     seq: AtomicU8,
-    /// Reusable per-packet buffer: header + max chunk. Held under a mutex
-    /// because `OutputSink::send_frame` takes `&self`, but in practice only
-    /// one task touches it.
+    /// The mutex permits buffer reuse through `OutputSink::send_frame(&self)`.
     pkt_buf: Mutex<BytesMut>,
 }
 
@@ -49,20 +45,18 @@ struct SpreadCfg {
 
 struct Metrics {
     frames: RateMeter,
-    /// Unique packets — one tick per distinct packet (excludes still-frame
-    /// redundancy duplicates). `pkt_jit` is read from this so still-frame
-    /// bursts don't show up as crushed-to-zero jitter.
+    /// Unique-packet timestamps exclude redundancy copies so packet jitter
+    /// measures spacing between distinct packets.
     unique_packets: RateMeter,
-    /// Physical UDP sends — one tick per `send_to`. Used for `phy` rate when
-    /// redundancy multiplies the on-wire packet count.
+    /// Physical send timestamps include redundancy copies for the on-wire rate.
     physical_packets: RateMeter,
     log_interval: Duration,
     last_log: Instant,
     /// Lifetime physical sends since stream start.
     tx_total: u64,
-    /// Last frame's `delay_ms` — for native-mode target FPS.
+    /// Last frame's `delay_ms`; for native-mode target FPS.
     last_delay_ms: f32,
-    /// Did the most recent frame actually engage spreading?
+    /// Whether the most recent frame used packet spreading.
     spread_active: bool,
 }
 
@@ -131,9 +125,8 @@ impl DdpSender {
         Ok(())
     }
 
-    /// Take ownership of the reusable per-packet buffer for the duration of
-    /// one frame emit. The caller hands it back via `return_pkt_buf` so the
-    /// allocation is reused on the next frame.
+    /// Takes temporary ownership of the packet allocation; use `return_pkt_buf`
+    /// after sending the frame.
     fn take_pkt_buf(&self) -> BytesMut {
         std::mem::replace(
             &mut *self.pkt_buf.lock(),
@@ -145,9 +138,8 @@ impl DdpSender {
         *self.pkt_buf.lock() = buf;
     }
 
-    /// Compute the spreading plan for a frame whose pacing wants
-    /// `delay_ms` between emits. Returns `None` when spreading is
-    /// disabled or the frame rate exceeds `spread_max_fps`.
+    /// Returns a packet-spreading plan, or `None` when disabled or above
+    /// the configured frame-rate limit. `delay_ms` is the frame interval.
     fn plan_spread(&self, delay_ms: f32, payload_bytes: usize) -> Option<spreading::Plan> {
         if !self.spread.enabled {
             return None;
@@ -193,7 +185,6 @@ impl DdpSender {
             let spread = m.spread_active;
             let last_delay_ms = m.last_delay_ms;
 
-            // pps formatting: surface redundancy multiplier when active.
             let pps_str = if (physical_pps - unique_pps).abs() > 0.5 {
                 let factor = if unique_pps > 0.0 {
                     physical_pps / unique_pps
@@ -205,7 +196,6 @@ impl DdpSender {
                 format!("{unique_pps:.0}")
             };
 
-            // Mode tag: pace=NHz vs native (~tgt fps from delay_ms).
             let mode_str = if self.pace_hz > 0 {
                 format!("pace={}Hz", self.pace_hz)
             } else {
@@ -257,9 +247,8 @@ impl OutputSink for DdpSender {
             }
             unique_packets = unique_packets.saturating_add(1);
 
-            // Apply spreading between unique-packet groups, not between
-            // redundant copies — matches the Python spec for still-frame
-            // redundancy that must be transmitted back-to-back.
+            // Redundant copies must be sent back-to-back; spread only between
+            // groups of distinct packets.
             if let Some(plan) = &spread_plan
                 && let Some(spacing) = plan.spacing
             {
@@ -294,7 +283,7 @@ impl OutputSink for DdpSender {
     }
 }
 
-/// Number of DDP packets a payload of `bytes` will split into.
+/// Returns the packet count for a payload of `bytes`.
 #[inline]
 pub fn packets_for(bytes: usize) -> usize {
     bytes.div_ceil(DDP_MAX_DATA)

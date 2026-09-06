@@ -1,14 +1,5 @@
-//! APNG decoder — the `png` crate gives us per-frame `FrameControl`
-//! (dispose_op, blend_op, offset x/y, size); we run the compositor manually.
-//!
-//! Disposal semantics (APNG spec):
-//! - 0 (NONE)        : leave frame on canvas before next.
-//! - 1 (BACKGROUND)  : clear the rect to transparent black before next.
-//! - 2 (PREVIOUS)    : restore canvas to pre-frame state before next.
-//!
-//! Blend semantics:
-//! - 0 (SOURCE): replace rect pixels entirely.
-//! - 1 (OVER)  : alpha-blend over existing pixels.
+//! APNG decoding with manual SOURCE/OVER blending and NONE/BACKGROUND/PREVIOUS
+//! disposal. Frames are snapshotted before disposal updates the canvas.
 
 use png::{BlendOp, ColorType, DisposeOp};
 
@@ -17,7 +8,7 @@ use crate::error::ImageError;
 
 pub struct ApngDecoder {
     reader: png::Reader<std::io::Cursor<Vec<u8>>>,
-    canvas: Vec<u8>, // RGBA, row-major at (width × height)
+    canvas: Vec<u8>, // RGBA, row-major at (width x height)
     previous_canvas: Vec<u8>,
     width: u32,
     height: u32,
@@ -46,9 +37,7 @@ impl ApngDecoder {
                 "apng: dimensions {width}x{height} exceed cap"
             )));
         }
-        // Pixel-count computed in u64 to dodge u32 overflow; cap at 128 Mpx
-        // (512 MB of RGBA) which is still an order of magnitude beyond any
-        // real-world animated PNG we'd stream to an LED panel.
+        // Widen before multiplication to avoid overflow in the canvas-size check.
         let pixels = u64::from(width) * u64::from(height);
         if pixels > 128 * 1024 * 1024 {
             return Err(ImageError::Decode("apng: canvas too large".into()));
@@ -85,7 +74,6 @@ impl ApngDecoder {
         let canvas_w = self.width;
         let canvas_h = self.height;
 
-        // Visible row/col span after clamping to the canvas.
         let copy_h = h.min(canvas_h.saturating_sub(y));
         let copy_w = w.min(canvas_w.saturating_sub(x));
         if copy_h == 0 || copy_w == 0 {
@@ -114,8 +102,7 @@ impl ApngDecoder {
             DisposeOp::None => {}
             DisposeOp::Background => {
                 let (x, y, w, h) = (fc.x_offset, fc.y_offset, fc.width, fc.height);
-                // x/y beyond the canvas → nothing to clear (defensive; the
-                // `png` crate rejects this, but belt-and-suspenders).
+                // Out-of-canvas disposal coordinates leave the canvas unchanged.
                 let Some(remaining_w) = self.width.checked_sub(x) else {
                     return;
                 };
@@ -156,8 +143,6 @@ impl ApngDecoder {
             .frame_control
             .ok_or_else(|| ImageError::Decode("apng: missing frame control".into()))?;
 
-        // Convert sub-frame to RGBA if needed. `png` gives us raw bytes in
-        // the source color type; coerce to RGBA8.
         let color = info.color_type;
         let bit_depth = info.bit_depth;
         if bit_depth != png::BitDepth::Eight {
@@ -173,17 +158,15 @@ impl ApngDecoder {
             &mut self.rgba_sub,
         )?;
 
-        // Save "before" state for PREVIOUS disposal.
+        // PREVIOUS disposal needs the canvas before this frame is composited.
         if matches!(frame_control.dispose_op, DisposeOp::Previous) {
             self.previous_canvas.copy_from_slice(&self.canvas);
         }
 
-        // Borrow rgba_sub immutably for composite. We re-borrow self.canvas
-        // mutably inside composite_frame — split-borrow via a local would
-        // help, but we route through composite_frame for clarity.
+        // Temporarily move the scratch buffer to borrow the compositor mutably.
         let rgba_sub = std::mem::take(&mut self.rgba_sub);
         self.composite_frame(frame_control, &rgba_sub);
-        self.rgba_sub = rgba_sub; // hand the buffer back
+        self.rgba_sub = rgba_sub;
 
         let delay_ms = {
             let num = f32::from(frame_control.delay_num);
@@ -200,8 +183,7 @@ impl ApngDecoder {
             }
         };
 
-        // Canvas is needed by the next frame's disposal/composite, so copy
-        // (don't move) it out.
+        // Clone because subsequent frames still need the working canvas.
         let frame = AnimatedFrame {
             rgba: self.canvas.clone(),
             width: self.width,
@@ -209,8 +191,7 @@ impl ApngDecoder {
             delay_ms,
         };
 
-        // Apply disposal for the NEXT frame (acts on self.canvas after we
-        // snapshotted the current frame into `frame.rgba`).
+        // Snapshot before disposal so the emitted frame retains its pixels.
         self.apply_dispose(frame_control);
 
         self.frames_read += 1;
@@ -218,8 +199,7 @@ impl ApngDecoder {
     }
 }
 
-/// Alpha-blend `src` (RGBA) over `dst` (RGBA), per pixel. Hot inner loop for
-/// `BlendOp::Over` — short-circuits the common α=255 (full overwrite) case.
+/// Composites straight-alpha RGBA `src` over `dst`; slice lengths must match.
 fn composite_row_over(dst: &mut [u8], src: &[u8]) {
     debug_assert_eq!(dst.len(), src.len());
     debug_assert!(dst.len().is_multiple_of(4));
@@ -237,9 +217,8 @@ fn composite_row_over(dst: &mut [u8], src: &[u8]) {
         if sa == 0 {
             continue;
         }
-        // Straight-alpha OVER. Weight destination RGB by its alpha too;
-        // otherwise a half-transparent pixel over transparent black darkens
-        // twice when the result is later flattened for an LED display.
+        // Weight destination RGB by destination alpha to avoid darkening translucent
+        // pixels twice when the composited canvas is flattened over black.
         let sa = u32::from(sa);
         let da = u32::from(d[3]);
         let inv = 255 - sa;
@@ -252,9 +231,8 @@ fn composite_row_over(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// Expand an arbitrary PNG sub-frame buffer to RGBA8 into `out`. APNG
-/// sub-frames can be any of the PNG color types; the `png` crate decodes them
-/// in their native form. `out` is resized to `n_pixels * 4` bytes.
+/// Expands transformed eight-bit PNG samples to `n_pixels * 4` RGBA bytes.
+/// Indexed samples must already be expanded by the PNG reader.
 fn expand_to_rgba8(
     buf: &[u8],
     color: ColorType,

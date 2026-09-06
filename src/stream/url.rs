@@ -1,8 +1,5 @@
-//! URL classification — shared by the stream orchestrator, resolver, and fetcher.
-//!
-//! Sources from the wire are normalized to URL strings at the entry-point
-//! boundaries via [`normalize_source`]; everything downstream assumes URL
-//! form (`http://`, `https://`, `file://`, `rtsp://`, …).
+//! Normalizes source strings at control boundaries and classifies URL hints
+//! for routing, fetching, and resolver bypass.
 
 use std::path::PathBuf;
 
@@ -13,13 +10,10 @@ const VIDEO_EXT: &[&str] = &[
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".3gp", ".ts",
 ];
 
-/// Normalize a wire-level `src` into a URL string. Run at every entry-point
-/// boundary so downstream code can assume URL form.
-///
-/// Pipeline: trim → percent-decode → rewrite `internal:` → wrap bare paths
-/// in `file://`. Relative paths resolve against the server's cwd. Windows
-/// drive letters fall through to the path branch (`c:\foo` has `:` but
-/// not `://`).
+/// Returns a URL after trimming, percent-decoding, and rewriting internal sources.
+/// Bare paths become file URLs relative to the server working directory; Windows
+/// drive paths are recognized by the absence of `://`. Returns an error for empty
+/// input, an unavailable working directory, or an unrepresentable file URL.
 pub fn normalize_source(raw: &str, server_host: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -45,13 +39,12 @@ pub fn normalize_source(raw: &str, server_host: &str) -> Result<String, String> 
         .map_err(|()| format!("not a valid file path: {}", abs.display()))
 }
 
-/// Rewrite `internal:<path>[?query]` to `http://<server_host>/api/internal/<path>[?query]`.
-/// Returns the input unchanged if it's not an `internal:` URL.
+/// Rewrites `internal:<path>[?query]` under the server's `/api/internal/` route.
+/// Other source strings pass through unchanged.
 pub fn rewrite_internal(url: &str, server_host: &str) -> String {
     let Some(rest) = url.strip_prefix("internal:") else {
         return url.to_string();
     };
-    // `internal:ha/sensor.temp?foo=bar` → path = `ha/sensor.temp`, query = `foo=bar`
     let (path, query) = match rest.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (rest, None),
@@ -62,14 +55,12 @@ pub fn rewrite_internal(url: &str, server_host: &str) -> String {
     }
 }
 
-/// True for `http://` / `https://` URLs. Used by ffmpeg-arg builders that
-/// want to attach HTTP-protocol options (`-headers`, `-reconnect`).
+/// Returns whether ffmpeg HTTP options apply to this URL.
 pub fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-/// Decode percent-escapes in a source URL. Falls back to the original
-/// string if the decoded bytes aren't valid UTF-8.
+/// Decodes percent escapes, preserving the input if decoding produces invalid UTF-8.
 pub fn percent_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s)
         .decode_utf8()
@@ -83,8 +74,7 @@ pub enum UrlKind {
     DirectImage,
     DirectVideo,
     StreamingProtocol(&'static str),
-    /// HTTP/HTTPS without a recognized media extension — could be a page
-    /// that needs the resolver, or a direct stream with no hint.
+    /// HTTP URL requiring header inspection or extraction to identify its media.
     HttpUnknown,
     Unknown,
 }
@@ -107,12 +97,8 @@ pub fn classify(url: &str) -> UrlKind {
     UrlKind::Unknown
 }
 
-/// Inspect the URL's extension (ignoring query/fragment) and return
-/// `DirectImage` / `DirectVideo` if recognized. Used by [`probe`] to
-/// classify `file://` URLs by extension when magic-byte detection fails,
-/// and as a fallback when HEAD doesn't return a useful Content-Type.
+/// Classifies recognized image or video extensions, ignoring query and fragment.
 pub fn classify_extension(url: &str) -> Option<UrlKind> {
-    // Strip query and fragment so `foo.png?token=…` still matches `.png`.
     let path_part = url.split_once('?').map_or(url, |(p, _)| p);
     let path_part = path_part.split_once('#').map_or(path_part, |(p, _)| p);
     let lower = path_part.to_ascii_lowercase();
@@ -125,19 +111,13 @@ pub fn classify_extension(url: &str) -> Option<UrlKind> {
     None
 }
 
-/// Returns a local filesystem path for `file://…` URLs. After
-/// [`normalize_source`] runs at every entry-point boundary, scheme-less
-/// paths shouldn't reach this function; only `file://` URLs need to be
-/// recognized. `Url::to_file_path` handles cross-platform decoding (drive
-/// letters on Windows, UNC shares, percent-decoding).
+/// Converts file URLs to paths, including platform-specific drive and UNC syntax.
 pub fn as_local_path(url: &str) -> Option<PathBuf> {
     Url::parse(url).ok().and_then(|u| u.to_file_path().ok())
 }
 
 impl UrlKind {
-    /// True if the orchestrator should dispatch this URL through the video
-    /// pipeline (resolver + ffmpeg). `HttpUnknown` is included so yt-dlp
-    /// pages reach the resolver and bare HTTP streams reach ffmpeg.
+    /// Returns whether URL hints suggest video, including HTTP sources needing extraction.
     pub fn is_video(&self) -> bool {
         matches!(
             self,
@@ -145,8 +125,7 @@ impl UrlKind {
         )
     }
 
-    /// True if the resolver can short-circuit — the URL already points at
-    /// direct media and doesn't need yt-dlp.
+    /// Returns whether URL hints identify media that can bypass extraction.
     pub fn is_direct_media(&self) -> bool {
         matches!(
             self,
@@ -166,8 +145,6 @@ mod tests {
 
     #[test]
     fn file_url_is_local_path() {
-        // After normalization, local paths reach `classify` as `file://`
-        // URLs; bare paths are no longer valid input here.
         let k = classify("file:///tmp/foo.png");
         assert!(matches!(k, UrlKind::LocalPath(_)));
         assert!(k.is_direct_media());

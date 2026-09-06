@@ -1,7 +1,5 @@
-//! Text rendering — BBCode parser + BDF font blitter.
-//!
-//! No MDI icon-atlas support: TTF rendering would pull in another dependency,
-//! and the bundled Spleen fonts do not contain MDI private-use glyphs.
+//! BBCode text rendering with bundled Spleen BDF fonts.
+//! MDI private-use glyphs require fonts and rasterization outside this renderer.
 
 pub mod bbcode;
 pub mod bdf;

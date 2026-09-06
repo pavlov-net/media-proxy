@@ -1,4 +1,4 @@
-//! HTTP + WebSocket server.
+//! HTTP and WebSocket server.
 
 pub mod health;
 pub mod internal;
@@ -8,7 +8,7 @@ pub use state::AppState;
 
 use axum::http::HeaderMap;
 
-/// Extract the `Host` header for use as `server_host` in source
+/// Extracts the `Host` header for use as `server_host` in source
 /// normalization. Falls back to `"localhost"` when missing or non-ASCII so
 /// `internal:` rewriting still produces a valid URL.
 pub fn host_header(headers: &HeaderMap) -> &str {
@@ -36,7 +36,7 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     let config = Arc::new(config);
     let resolver: Arc<dyn Resolver> = build_resolver(&config)?;
 
-    // Warm hwaccel probe off the request path (~25-100ms per backend).
+    // Start hardware probing in the background to reduce first-request work.
     tokio::task::spawn_blocking(|| {
         let probed = crate::video::hwaccel::available();
         info!(?probed, "hwaccel probe complete");
@@ -66,9 +66,8 @@ pub async fn serve(addr: SocketAddr, config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Explicit `resolver.url` wins; otherwise auto-detect local `yt-dlp`;
-/// otherwise fail closed. Always wrapped in `PassthroughLayer` so direct
-/// media short-circuits.
+/// Selects an external resolver or local yt-dlp. Direct media bypasses resolution;
+/// other inputs fail when neither resolver is available.
 fn build_resolver(config: &Arc<Config>) -> Result<Arc<dyn Resolver>> {
     let timeout = Duration::from_millis(config.resolver.timeout_ms);
     let inner: Box<dyn Resolver> = if let Some(url) = &config.resolver.url {

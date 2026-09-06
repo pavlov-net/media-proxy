@@ -1,4 +1,4 @@
-//! axum WebSocket handler — wires a connection to the `Handler` dispatcher.
+//! WebSocket sessions with message dispatch and heartbeat timeouts.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,14 +23,10 @@ use crate::control::session::Session;
 /// Time the server waits for the initial `hello` before giving up.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the server sends a WebSocket-level PING. tungstenite/axum
-/// will auto-respond to ours, and incoming traffic resets the activity
-/// clock — so as long as the TCP path is up, the connection stays open.
+/// Interval between server PING frames; client PONGs count as activity.
 const PING_INTERVAL: Duration = Duration::from_secs(15);
 
-/// If no traffic at all (text, binary, ping, pong) arrives within this
-/// window, the connection is considered dead. Generous enough to absorb
-/// one missed ping/pong round-trip.
+/// Idle threshold checked at each PING tick; tolerates one missed round trip.
 const IDLE_DEAD: Duration = Duration::from_secs(45);
 
 pub async fn upgrade(
@@ -85,9 +81,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, addr: Socket
         RecvOutcome::Closed => return,
     }
 
-    // Main loop — server-driven heartbeat: send a PING every PING_INTERVAL,
-    // give up if no traffic at all for IDLE_DEAD. The client doesn't have
-    // to send anything (incoming PONGs reset `last_activity`).
+    // PONGs count as activity, so idle clients need no application-level heartbeat.
     let mut last_activity = Instant::now();
     let mut ping_iv = interval(PING_INTERVAL);
     ping_iv.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -119,7 +113,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, addr: Socket
                         break;
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Binary(_))) => {
-                        // tungstenite auto-responds to PING; PONG is just bookkeeping.
+                        // tungstenite responds to PING; every received frame resets idle tracking.
                     }
                     Some(Err(e)) => {
                         debug!(client = %addr, error = %e, "ws recv error");
@@ -141,7 +135,6 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, addr: Socket
         }
     }
 
-    // Cancel any remaining streams for this session.
     let handles: Vec<_> = session.streams.lock().drain().map(|(_, h)| h).collect();
     for h in handles {
         h.cancel();
@@ -183,10 +176,7 @@ async fn send_error(socket: &mut WebSocket, code: &str, msg: &str) -> Result<(),
     send_server_msg(socket, &err).await
 }
 
-/// Classify benign disconnect errors — Windows `winerror 64/121` and
-/// generic connection-reset — so we can log them at `info` instead of
-/// `warn`. (Kept as a helper for future use; axum's error types don't
-/// currently expose the underlying OS code.)
+/// Recognizes reset, broken-pipe and disconnect messages by text.
 #[allow(dead_code)]
 pub fn is_benign_disconnect(e: &axum::Error) -> bool {
     let s = e.to_string().to_ascii_lowercase();

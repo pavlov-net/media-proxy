@@ -1,4 +1,4 @@
-//! End-to-end static image pipeline: decoded RGBA → target RGB888.
+//! Static image processing from decoded RGBA to target-sized RGB888.
 
 use crate::control::fields::Fit;
 use crate::error::ImageError;
@@ -20,8 +20,7 @@ pub struct PipelineParams {
 pub struct ImagePipeline;
 
 impl ImagePipeline {
-    /// Run the pipeline: ICC → resize (in linear light when gamma-aware) →
-    /// fit → unsharp → RGB888 output.
+    /// Applies ICC conversion, resize, fit and unsharp masking, returning RGB888.
     pub fn run(mut image: DecodedImage, params: &PipelineParams) -> Result<Vec<u8>, ImageError> {
         if params.color_correction {
             icc::to_srgb_inplace_soft(&mut image.rgba, image.icc_profile.as_deref());
@@ -73,15 +72,8 @@ impl ImagePipeline {
     }
 }
 
-/// Gamma-aware resize: pack the RGBA source as a single U16x4 image with R/G/B
-/// in linear light and alpha widened (`a * 257`), resize once via
-/// `fast_image_resize`, then narrow back to RGB888 + sRGB alpha.
-///
-/// Single-pass resize replaces the previous four separate single-channel
-/// resizes (3× u16 + 1× u8). Alpha rounds slightly differently — the u16
-/// widen/narrow round-trips through the resize at one extra bit of precision,
-/// so the output may differ by ±1 in alpha. R/G/B remain bit-identical for
-/// the convolution given the same algorithm.
+/// Resizes RGBA through one U16x4 buffer, with RGB in linear light and alpha
+/// widened by 257. Returns sRGB-encoded RGBA8 with rounded alpha.
 fn resize_rgba_gamma_aware(
     src: &[u8],
     src_w: u32,
@@ -98,7 +90,7 @@ fn resize_rgba_gamma_aware(
         q[0] = gamma::SRGB_TO_LINEAR_U16[px[0] as usize];
         q[1] = gamma::SRGB_TO_LINEAR_U16[px[1] as usize];
         q[2] = gamma::SRGB_TO_LINEAR_U16[px[2] as usize];
-        q[3] = u16::from(px[3]) * 257; // [0..255] → [0..65535]
+        q[3] = u16::from(px[3]) * 257; // [0..255] -> [0..65535]
     }
 
     let dst_u16 = resize::resize_u16x4(&src_u16, src_w, src_h, dst_w, dst_h, method)?;
@@ -110,7 +102,7 @@ fn resize_rgba_gamma_aware(
         out[i * 4] = gamma::LINEAR_TO_SRGB_U8[p[0] as usize];
         out[i * 4 + 1] = gamma::LINEAR_TO_SRGB_U8[p[1] as usize];
         out[i * 4 + 2] = gamma::LINEAR_TO_SRGB_U8[p[2] as usize];
-        // narrow u16 → u8: `(v + 128) / 257` is the exact inverse of `*257`.
+        // Rounded division by 257 preserves the alpha widening round trip.
         out[i * 4 + 3] = ((u32::from(p[3]) + 128) / 257) as u8;
     }
     Ok(out)

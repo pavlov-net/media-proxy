@@ -1,4 +1,4 @@
-//! Packet spreading — spread `pkt_count` DDP packets across one frame
+//! Packet spreading distributes DDP packets across one frame
 //! interval so the receiver's input buffer doesn't take the whole frame in
 //! one burst.
 
@@ -22,7 +22,7 @@ impl Plan {
     };
 }
 
-/// Compute `(spacing, group_n)` for spreading `pkt_count` packets across
+/// Computes `(spacing, group_n)` for spreading `pkt_count` packets across
 /// `frame_interval`. If neither is useful (zero packets / zero interval),
 /// returns `Plan::NONE`.
 pub fn compute_spacing_and_group(pkt_count: u32, frame_interval: Duration, cfg: &SpreadConfig) -> Plan {
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn ideal_above_min_keeps_group_1() {
-        // 33ms / 10 = 3.3ms > 3ms min → group_n=1
+        // 33ms / 10 = 3.3ms > 3ms min -> group_n=1
         let cfg = SpreadConfig {
             min_spacing: Duration::from_millis(3),
             max_sleeps: 0,
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn ideal_below_min_groups_up() {
-        // 33ms / 100 = 0.33ms < 3ms → group to reach min (10)
+        // 33ms / 100 = 0.33ms < 3ms -> group to reach min (10)
         let cfg = SpreadConfig {
             min_spacing: Duration::from_millis(3),
             max_sleeps: 0,

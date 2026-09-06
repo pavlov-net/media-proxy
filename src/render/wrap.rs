@@ -1,4 +1,4 @@
-//! Word wrap — pixel-accurate, BDF-font aware.
+//! Pixel-width word wrapping using BDF glyph advances.
 
 use crate::render::bdf::BdfFont;
 
@@ -19,7 +19,7 @@ pub fn wrap(text: &str, font: &BdfFont, max_width: u32) -> Vec<String> {
             if font.measure(&candidate) <= max_width {
                 current = candidate;
             } else if current.is_empty() {
-                // Single oversized word: accept anyway.
+                // Keep oversized words intact rather than splitting glyph sequences.
                 lines.push(word.to_string());
             } else {
                 lines.push(std::mem::take(&mut current));
@@ -48,8 +48,7 @@ mod tests {
     #[test]
     fn wraps_on_word_boundary() {
         let font = get(FontSize::S5x8).unwrap();
-        // Spleen 5x8 advance width is 5px per glyph → "hello world" is
-        // 11*5 = 55 pixels. With max_width = 30, we should get two lines.
+        // Each Spleen 5x8 glyph advances five pixels; the space makes this 55 pixels.
         let out = wrap("hello world", font, 30);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0], "hello");

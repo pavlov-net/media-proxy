@@ -1,4 +1,4 @@
-//! Client control plane — WebSocket protocol, session tracking, field
+//! Client control plane: WebSocket protocol, session tracking, field
 //! validation, handler dispatch.
 
 pub mod fields;

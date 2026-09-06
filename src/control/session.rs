@@ -10,8 +10,7 @@ use parking_lot::Mutex;
 use crate::output::sink::StreamId;
 use crate::stream::handle::StreamHandle;
 
-/// Identity of a client-addressed stream on the wire. Currently DDP-only
-/// (`(ddp_host, output_id)`); other sink types extend this enum.
+/// Client-addressed stream identity, independent of the internal `StreamId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientKey {
     Ddp { dest: IpAddr, output_id: u8 },

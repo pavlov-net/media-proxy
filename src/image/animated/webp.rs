@@ -55,8 +55,7 @@ impl WebpDecoder {
     pub fn next_frame(&mut self) -> Result<Option<AnimatedFrame>, ImageError> {
         let Some(limit) = self.frame_count else {
             if self.frames_read == 0 {
-                // Single-frame WebP decoded through the animated path —
-                // read_image once and return.
+                // The animated dispatcher also routes static WebP through this decoder.
                 self.decoder.read_image(&mut self.buf).map_err(webp_err)?;
                 self.frames_read = 1;
                 return Ok(Some(AnimatedFrame {
@@ -92,9 +91,8 @@ impl WebpDecoder {
         }))
     }
 
-    /// Hand the current canvas buffer to the caller and replace it with a
-    /// fresh allocation. `read_frame` / `read_image` fully overwrite the
-    /// buffer on the next call, so we don't need to preserve its contents.
+    /// Returns owned RGBA pixels. Alpha buffers can be moved because the decoder
+    /// overwrites them; opaque RGB buffers require expansion.
     fn take_buf(&mut self) -> Vec<u8> {
         if self.decoder.has_alpha() {
             let cap = self.buf.len();

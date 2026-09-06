@@ -1,5 +1,4 @@
-//! Pick the right decoder by format sniff, composite all frames through the
-//! still-image pipeline, populate the frame cache, return the sequence.
+//! Decodes animations into target-sized RGB888 sequences with optional caching.
 
 use std::sync::Arc;
 
@@ -24,9 +23,7 @@ enum Kind {
     SinglePng,
 }
 
-/// Sniff the format from the leading bytes. Indicates whether the buffer is
-/// an animated container we handle, or a single-frame format to fall back
-/// to the still-image pipeline.
+/// Identifies GIF, APNG, WebP or static PNG from the container bytes.
 fn sniff(data: &[u8]) -> Option<Kind> {
     if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
         return Some(Kind::Gif);
@@ -58,9 +55,7 @@ pub fn is_animated(data: &[u8]) -> bool {
     matches!(sniff(data), Some(Kind::Gif | Kind::Apng | Kind::Webp))
 }
 
-/// Cap on decoded frames per animated source. A 50 MB file can claim
-/// millions of tiny frames; we refuse to composite past this count so the
-/// cache + pipeline can't be tricked into eating the heap.
+/// Limits frame-count amplification from small compressed animations.
 const MAX_ANIMATED_FRAMES: usize = 10_000;
 
 #[derive(Debug)]
@@ -76,8 +71,7 @@ pub struct AnimatedDispatchParams<'a> {
     pub r#loop: bool,
 }
 
-/// Load, decode, composite, and cache all frames of an animated source.
-/// Returns an Arc-shared sequence ready to emit at native cadence.
+/// Returns all rendered frames, reusing or populating the cache when eligible.
 pub fn dispatch(
     data: Vec<u8>,
     params: &AnimatedDispatchParams,
@@ -107,8 +101,7 @@ pub fn dispatch(
         }
     };
 
-    // Composite each frame through the still-image pipeline so the cached
-    // frames are at target size + RGB888.
+    // Use the static pipeline so animated and still frames share rendering settings.
     let mut composed: Vec<(Bytes, f32)> = Vec::new();
     while let Some(AnimatedFrame {
         rgba,

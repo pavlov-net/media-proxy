@@ -184,9 +184,7 @@ def run(binary):
                         assert response['type'] == 'ack', response
                         for _ in range(3):
                             assert udp.recv(65535)[10:] == b'\0\0\xff' * 256
-                        # Exercise retained default media paths, including decoder
-                        # formats previously missed by unit coverage. Omit loop,
-                        # fit, fmt, pace, ema, expand and hw as ddp-esphome does.
+                        # Omit playback overrides to exercise the defaults used by ddp-esphome.
                         sources = [str(root / name) for name in ['red.png', 'wide.png', 'anim.gif', 'anim.png', 'anim.webp', 'clip.mp4']]
                         sources += [media_url + '/stream']
                         if shutil.which('yt-dlp'):

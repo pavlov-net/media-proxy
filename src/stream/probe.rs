@@ -1,16 +1,5 @@
-//! Probe a normalized source URL for image-vs-video routing.
-//!
-//! `classify()` decides on URL scheme + extension alone. That's wrong for
-//! several real-world cases: `.jpg` URLs serving `multipart/x-mixed-replace`
-//! (IP-camera MJPEG) need the video pipeline, and extension-less HTTP URLs
-//! could be either. The Python version handled this with a pre-dispatch
-//! HEAD request; this module restores that behavior.
-//!
-//! Strategy:
-//! - `http(s)://` → HEAD request, branch on `Content-Type`.
-//! - `file://` → read the first ~512 bytes, sniff with `infer`.
-//! - `rtsp://` / `rtmp://` / `udp://` / `tcp://` → trust the scheme.
-//! - Anything ambiguous falls back to extension-based [`classify`].
+//! Routes sources by HTTP Content-Type, local magic bytes, or URL hints.
+//! Header probing handles extensionless media and MJPEG served from image URLs.
 
 use std::time::Duration;
 
@@ -29,9 +18,7 @@ pub enum MediaKind {
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 const FILE_SNIFF_BYTES: usize = 512;
 
-/// Probe `url` and return whether it should route to the image or video
-/// pipeline. Never errors — probe failures (network, missing file, parse)
-/// fall back to extension-based classification.
+/// Returns a media kind, falling back to URL hints when probing fails.
 pub async fn probe(url: &str, user_agent: &str) -> MediaKind {
     let Ok(parsed) = Url::parse(url) else {
         return fallback(url);
@@ -94,8 +81,7 @@ async fn probe_file(parsed: &Url) -> Option<MediaKind> {
 
 pub(crate) fn classify_content_type(ct: &str) -> Option<MediaKind> {
     let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    // IP-camera MJPEG and similar pushed-frames streams: `.jpg`-extension
-    // URL but the response is a multipart stream that ffmpeg handles.
+    // MJPEG multipart responses require ffmpeg, even on image-like URLs.
     if mime == "multipart/x-mixed-replace" {
         return Some(MediaKind::Video);
     }
@@ -105,7 +91,6 @@ pub(crate) fn classify_content_type(ct: &str) -> Option<MediaKind> {
     if mime.starts_with("video/") || mime.starts_with("audio/") {
         return Some(MediaKind::Video);
     }
-    // Common video-ish containers/manifests served as `application/*`.
     if matches!(
         mime.as_str(),
         "application/vnd.apple.mpegurl"
@@ -116,15 +101,12 @@ pub(crate) fn classify_content_type(ct: &str) -> Option<MediaKind> {
     ) {
         return Some(MediaKind::Video);
     }
-    // Everything else (`text/html`, `application/octet-stream`, missing) →
-    // let the caller fall back to extension/scheme.
+    // Unrecognized MIME types leave routing to the URL fallback.
     None
 }
 
 fn fallback(url: &str) -> MediaKind {
-    // Extension wins when present — covers both `file://` URLs (which
-    // `classify` collapses to `LocalPath`) and HTTP URLs whose HEAD didn't
-    // produce a useful Content-Type.
+    // Check extensions before `classify`, which collapses local URLs to LocalPath.
     if let Some(k) = classify_extension(url) {
         return match k {
             UrlKind::DirectImage => MediaKind::Image,
@@ -132,9 +114,7 @@ fn fallback(url: &str) -> MediaKind {
         };
     }
     match classify(url) {
-        // No extension hint and bytes weren't recognizable. Local files
-        // without an extension go to the image pipeline (matches Python
-        // behavior); ambiguous HTTP URLs go to the resolver/ffmpeg path.
+        // Ambiguous local sources use the image decoder; HTTP sources use the resolver.
         UrlKind::LocalPath(_) => MediaKind::Image,
         _ => MediaKind::Video,
     }
@@ -257,8 +237,6 @@ mod tests {
 
     #[tokio::test]
     async fn probe_local_missing_file_falls_back() {
-        // No magic bytes available; falls through to extension-based
-        // classify, which sees `.png` → Image.
         let url = "file:///nonexistent/path/to/foo.png";
         assert_eq!(probe(url, "ua").await, MediaKind::Image);
     }

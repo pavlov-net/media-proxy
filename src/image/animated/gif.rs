@@ -1,8 +1,4 @@
-//! GIF decoder with disposal handling via `gif` + `gif-dispose`.
-//!
-//! `gif-dispose` 6.x owns the canvas state and handles all three disposal
-//! methods (NONE / BACKGROUND / PREVIOUS) — we just feed it decoded frames
-//! and it returns the fully-composited canvas.
+//! GIF decoding through `gif-dispose`, which owns the canvas and disposal state.
 
 use gif::Decoder;
 use gif_dispose::Screen;
@@ -35,8 +31,7 @@ impl GifDecoder {
             Ok(None) => return Ok(None),
             Err(e) => return Err(ImageError::Decode(format!("gif frame: {e}"))),
         };
-        // GIF delay is in centiseconds; clamp to MIN_DELAY_MS so downstream
-        // pacing never sees a sub-frame interval.
+        // GIF stores delays in centiseconds.
         let delay_ms = {
             let raw = f32::from(frame.delay) * 10.0;
             if raw <= 0.0 {
@@ -52,9 +47,7 @@ impl GifDecoder {
         let pixels = self.screen.pixels_rgba();
         let (w, h) = (pixels.width() as u32, pixels.height() as u32);
 
-        // `pixels_rgba()` returns `ImgVec<RGBA8>`; flatten to `&[u8]` via
-        // bytemuck since `RGBA8` is `#[repr(C)]` Pod. `Screen` owns its
-        // canvas — we have to copy to hand the caller an owned buffer.
+        // `Screen` owns the canvas; copying gives the caller independent frame pixels.
         let rgba_bytes: &[u8] = bytemuck::cast_slice(pixels.buf());
         Ok(Some(AnimatedFrame {
             rgba: rgba_bytes.to_vec(),

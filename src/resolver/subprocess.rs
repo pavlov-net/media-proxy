@@ -1,7 +1,4 @@
-//! Local `yt-dlp` subprocess resolver. Thin adapter between the `Resolver`
-//! trait and [`crate::yt_dlp::YtDlp`] — translates `ResolveRequest` →
-//! format-selector + URL, calls `YtDlp::resolve`, translates `Info` →
-//! `ResolveResponse`.
+//! Adapts resolver requests to yt-dlp format selection and metadata extraction.
 
 use std::time::Duration;
 
@@ -29,9 +26,7 @@ impl SubprocessResolver {
 #[async_trait]
 impl Resolver for SubprocessResolver {
     async fn resolve(&self, req: ResolveRequest) -> Result<ResolveResponse, ResolverError> {
-        // Resolve the codec preference list against the backend ffmpeg will
-        // *actually* pick — auto-mode picks the platform's first available, a
-        // specific name passes through if supported, anything else → cpu list.
+        // Codec preference must match the backend available for decoding.
         let hw = pick_hw_backend(req.hw_prefer.as_deref().unwrap_or("auto"), hwaccel::available());
         let format_expr = build_format(&FormatParams {
             height: req.target_h,

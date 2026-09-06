@@ -1,8 +1,5 @@
-//! LRU frame cache keyed by URL + stream options, bounded by MB.
-//!
-//! Only activates for looping animations with at least `frame_cache_min_frames`
-//! frames — short or one-shot sequences aren't worth the memory. Shared across
-//! streams so two clients watching the same GIF pay decode cost once.
+//! Memory-bounded LRU cache of rendered animation frames, shared across streams.
+//! The dispatcher caches looping sequences that meet the minimum frame count.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +18,7 @@ pub struct CacheKey {
 
 #[derive(Debug, Clone)]
 pub struct CachedSequence {
-    /// Pre-rendered RGB888 frames at the target size + delay per frame.
+    /// Rendered RGB888 frames at target size, paired with delays in milliseconds.
     pub frames: Vec<(Bytes, f32)>,
     bytes: usize,
 }
@@ -64,11 +61,10 @@ impl FrameCache {
         self.is_enabled() && looping && frame_count >= self.min_frames
     }
 
-    /// Look up cached frames; touches LRU on hit.
+    /// Looks up cached frames; touches LRU on hit.
     pub fn get(&self, key: &CacheKey) -> Option<Arc<CachedSequence>> {
         let mut inner = self.inner.lock();
         let seq = inner.entries.get(key).cloned()?;
-        // Move key to MRU position.
         if let Some(pos) = inner.lru.iter().position(|k| k == key) {
             let k = inner.lru.remove(pos);
             inner.lru.push(k);
@@ -76,7 +72,7 @@ impl FrameCache {
         Some(seq)
     }
 
-    /// Insert a sequence. Evicts LRU entries until the new total fits under
+    /// Inserts a sequence. Evicts LRU entries until the new total fits under
     /// `max_bytes`. If `seq.bytes > max_bytes` the insert is refused.
     pub fn insert(&self, key: CacheKey, seq: CachedSequence) -> Option<Arc<CachedSequence>> {
         if seq.bytes > self.max_bytes {
@@ -85,7 +81,6 @@ impl FrameCache {
         let arc = Arc::new(seq);
         let mut inner = self.inner.lock();
 
-        // If this key is already cached, evict the old entry first.
         if let Some(old) = inner.entries.remove(&key) {
             inner.bytes = inner.bytes.saturating_sub(old.bytes);
             if let Some(pos) = inner.lru.iter().position(|k| k == &key) {
@@ -162,7 +157,7 @@ mod tests {
         let k3 = key("c");
         c.insert(k1.clone(), seq(1024));
         c.insert(k2.clone(), seq(1024));
-        let _ = c.get(&k1); // k1 now MRU
+        let _ = c.get(&k1); // touch k1 to protect it from eviction
         c.insert(k3.clone(), seq(1024)); // evicts k2, not k1
         assert!(c.get(&k1).is_some());
         assert!(c.get(&k2).is_none());

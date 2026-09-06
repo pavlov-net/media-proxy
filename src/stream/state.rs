@@ -1,6 +1,4 @@
-//! Typed state machine for a single stream.
-//!
-//! Invalid transitions are type errors rather than runtime checks.
+//! Stream lifecycle states and runtime transition validation.
 
 use crate::error::StreamError;
 

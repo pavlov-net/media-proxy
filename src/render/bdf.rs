@@ -1,10 +1,5 @@
-//! BDF (Bitmap Distribution Format) parser — minimal, just enough to render
-//! Spleen 5x8 / 6x12 / 8x16.
-//!
-//! Each glyph is stored as a bitmap indexed by `char`. The bitmap is packed
-//! left-to-right, top-to-bottom, one bit per pixel. `dwidth` is the advance
-//! width (pen movement after drawing). BBX describes the bounding box:
-//! `w h x_off y_off` where the offsets are relative to the origin.
+//! BDF font parsing with glyphs indexed by Unicode code point.
+//! Glyph rows are MSB-first and byte-aligned; BBX offsets are relative to the origin.
 
 use std::collections::HashMap;
 
@@ -22,10 +17,9 @@ pub struct Glyph {
     pub bbx_h: u16,
     /// X-offset of bounding box from origin.
     pub bbx_x: i16,
-    /// Y-offset of bounding box from origin (baseline = 0, ascenders > 0).
+    /// Bounding-box bottom relative to the baseline; positive values are above it.
     pub bbx_y: i16,
-    /// One byte per row, MSB-first within each byte, padded to byte boundary.
-    /// Length = `bbx_h * bytes_per_row`.
+    /// MSB-first rows padded to byte boundaries; length is `bbx_h * bytes_per_row`.
     pub bitmap: Vec<u8>,
     /// `ceil(bbx_w / 8)`, cached from parse so `pixel()` doesn't recompute.
     pub bytes_per_row: u16,
@@ -37,14 +31,14 @@ pub struct BdfFont {
     pub fbb_w: u16,
     /// Font-wide bounding box height.
     pub fbb_h: u16,
-    /// Ascent above baseline (top of font bbox above origin).
+    /// Font bounding-box bottom relative to the baseline, in pixels.
     pub fbb_y_off: i16,
     glyphs: HashMap<u32, Glyph>,
     default_advance: u16,
 }
 
 impl BdfFont {
-    /// Parse a BDF font from its textual representation.
+    /// Parses a BDF font from its textual representation.
     pub fn parse(text: &str) -> Result<Self, RenderError> {
         let mut lines = text.lines().map(str::trim);
         let mut fbb_w = 8u16;
@@ -85,7 +79,7 @@ impl BdfFont {
         self.glyph(c as u32).map_or(self.default_advance, |g| g.dwidth)
     }
 
-    /// Advance width of a whole string.
+    /// Returns the total pen advance in pixels, including fallback widths.
     pub fn measure(&self, text: &str) -> u32 {
         text.chars().map(|c| u32::from(self.advance_for(c))).sum()
     }
@@ -125,7 +119,6 @@ fn parse_glyph<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Result<Option<G
     }
 
     let Some(code) = code else {
-        // Discard glyph until ENDCHAR without insertion.
         for l in lines.by_ref() {
             if l == "ENDCHAR" {
                 break;
@@ -190,7 +183,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_bdf() {
-        // Tiny hand-written BDF: one glyph "A" (code 65), 4×5 box, advance 5.
+        // Hand-written BDF: one glyph "A" (code 65), 4x5 box, advance 5.
         let bdf = "\
 STARTFONT 2.1
 FONTBOUNDINGBOX 4 5 0 0
@@ -212,12 +205,12 @@ ENDFONT
         assert_eq!(g.dwidth, 5);
         assert_eq!(g.bbx_w, 4);
         assert_eq!(g.bbx_h, 5);
-        // Row 0: 0x40 = 0100 0000 → only bit col=1 set in the 4-wide bbox.
+        // Row 0: 0x40 = 0100 0000 -> only bit col=1 set in the 4-wide bbox.
         assert!(!g.pixel(0, 0));
         assert!(g.pixel(1, 0));
         assert!(!g.pixel(2, 0));
         assert!(!g.pixel(3, 0));
-        // Row 2: 0xF0 = 1111 0000 → all 4 bits set.
+        // Row 2: 0xF0 = 1111 0000 -> all 4 bits set.
         assert!(g.pixel(0, 2));
         assert!(g.pixel(3, 2));
     }
@@ -244,7 +237,7 @@ ENDCHAR
 ENDFONT
 ";
         let font = BdfFont::parse(bdf).unwrap();
-        assert_eq!(font.measure("AA"), 12); // 6 + 6
+        assert_eq!(font.measure("AA"), 12);
         assert_eq!(font.measure("AB"), 11); // 6 + default 5
     }
 }

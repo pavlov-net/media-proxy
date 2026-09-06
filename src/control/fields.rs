@@ -1,7 +1,5 @@
-//! Control protocol field definitions + derived `StreamOptions`.
-//!
-//! Serde handles type-level validation; cross-field constraints land in
-//! [`StreamFields::from_start`].
+//! Control message fields and resolved stream parameters.
+//! Start and update requests share `StreamFields::validate`.
 
 use std::net::IpAddr;
 
@@ -43,8 +41,7 @@ pub enum HwPref {
 }
 
 impl HwPref {
-    /// Canonical lowercase name accepted by `ffmpeg -hwaccel` and our own
-    /// `HwBackend::from_str_canon`. `None` → `None`.
+    /// Returns the canonical hardware name, or `None` for disabled acceleration.
     pub fn as_canon(self) -> Option<&'static str> {
         Some(match self {
             Self::Auto => "auto",
@@ -58,10 +55,8 @@ impl HwPref {
     }
 }
 
-/// `start_stream` request.
-///
-/// Required: `out`, `w`, `h`, `src`. Everything else has a default derived
-/// from config.
+/// Start request with required output, dimensions and source.
+/// `StreamFields::from_start` supplies defaults for omitted options.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StartStream {
     pub out: i32,
@@ -124,8 +119,7 @@ pub struct UpdateStream {
     pub ema: Option<f32>,
 }
 
-/// `applied` map in `ack` responses — the canonical view of the resolved
-/// stream parameters returned to the client.
+/// Resolved stream parameters returned in the acknowledgment's `applied` map.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AppliedParams {
     pub src: String,
@@ -140,21 +134,16 @@ pub struct AppliedParams {
     pub ddp_host: Option<String>,
 }
 
-/// Narrow the wire-level `out: i32` to the DDP header's `out_id: u8`.
-/// Wire format: low 8 bits verbatim (`out_id & 0xFF`).
+/// Returns the low eight bits of the wire output ID for the DDP header.
 #[inline]
 pub fn output_id_byte(out: i32) -> u8 {
     (out & 0xFF) as u8
 }
 
-/// Upper bound on per-stream width/height. Anything we'd reasonably drive
-/// onto an LED display is far below this; the cap only exists to refuse
-/// inputs that would blow the per-frame allocation budget.
+/// Dimension cap bounds per-frame allocations.
 pub const MAX_OUTPUT_DIM: u32 = 4096;
 
-/// Validated & resolved stream configuration. Construct from a `StartStream`
-/// (or an `UpdateStream` layered over the previous state) via
-/// [`StreamFields::from_start`].
+/// Resolved stream parameters. Start and update constructors validate their values.
 #[derive(Debug, Clone)]
 pub struct StreamFields {
     pub output_id: i32,
@@ -179,11 +168,7 @@ impl StreamFields {
         server_host: &str,
         defaults: &crate::Config,
     ) -> Result<Self, ControlError> {
-        // Parse-time errors that aren't representable in the struct
-        // (string→enum, string→IpAddr, source URL normalization) are
-        // surfaced eagerly here. Numeric range invariants are deferred to
-        // `validate` so `from_start` and `merge_update` enforce the same
-        // post-construction rules.
+        // Start and update share range validation after parsing and source normalization.
         let source =
             crate::stream::url::normalize_source(&req.src, server_host).map_err(ControlError::BadRequest)?;
 
@@ -226,9 +211,7 @@ impl StreamFields {
         Ok(fields)
     }
 
-    /// Post-construction invariants for both start and update flows.
-    /// Width/height caps exist so a malicious or misconfigured client
-    /// can't force giant per-frame allocations (`w * h * channels`).
+    /// Checks output dimensions, output ID, DDP port, expansion mode and EMA range.
     pub fn validate(&self) -> Result<(), ControlError> {
         if self.width == 0 || self.height == 0 {
             return Err(ControlError::BadRequest("w/h must be > 0".into()));
@@ -272,16 +255,8 @@ impl StreamFields {
     }
 }
 
-/// Overlay `update` fields onto a prior stream's resolved state. Any field
-/// left `None` in the update keeps the prior value. The `src` field, if
-/// present, runs through the same [`normalize_source`] pipeline as the
-/// original `from_start`.
-///
-/// Invalid `fmt` and `ddp_host` values fail the request rather than being
-/// silently ignored — the previous behaviour let a client send `fmt: "junk"`
-/// and receive a successful ack while the field had no effect. After all
-/// fields land, the merged value runs through [`StreamFields::validate`]
-/// so update requests can't reach states that `start_stream` would reject.
+/// Merges supplied update fields, retaining omitted values. Normalizes sources
+/// and rejects invalid fields using the same validation as start requests.
 pub fn merge_update(
     prior: &StreamFields,
     upd: &UpdateStream,

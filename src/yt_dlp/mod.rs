@@ -1,18 +1,6 @@
-//! yt-dlp integration: pure helpers (format selector, output parsing) plus
-//! the subprocess driver. Decoupled from the `Resolver` trait so anything in
-//! the codebase can shell out to yt-dlp without going through the resolver
-//! layer.
-//!
-//! Distribution assumption: `yt-dlp` and (for YouTube) `deno` are on `PATH`.
-//! Recommended install:
-//!
-//! ```text
-//! uv tool install 'yt-dlp[default,curl-cffi]'   # bundles yt-dlp-ejs
-//! ```
-//!
-//! `[default]` includes `yt-dlp-ejs` which carries the JS bundle Deno
-//! executes for YouTube's signature/n-sig challenges. Without it, YouTube
-//! resolution fails. Other extractors don't need Deno.
+//! Runs yt-dlp extraction with format selection, output parsing, and cancellation.
+//! yt-dlp and the optional Deno runtime are discovered on PATH; YouTube challenge
+//! solving requires a supported runtime and the yt-dlp-ejs package.
 
 pub mod format;
 pub mod output;
@@ -31,8 +19,7 @@ pub struct YtDlp {
     deno: Option<PathBuf>,
 }
 
-/// Extraction can launch Deno workers. Killing only yt-dlp leaves those
-/// workers running after a timeout or stream cancellation.
+/// Kills the extraction process group on cancellation, including Deno workers.
 #[cfg(unix)]
 struct ProcessGroupGuard(Option<rustix::process::Pid>);
 
@@ -53,8 +40,7 @@ pub enum YtDlpError {
     #[error("yt-dlp spawn failed: {0}")]
     Spawn(#[from] std::io::Error),
 
-    /// yt-dlp exited non-zero. `message` is the last `ERROR:` line scraped
-    /// from stderr, or a generic failure message if none was found.
+    /// Nonzero exit with the last `ERROR:` line, remaining stderr, or a fallback message.
     #[error("yt-dlp failed: {message}")]
     Failed { message: String, exit_code: Option<i32> },
 
@@ -63,10 +49,7 @@ pub enum YtDlpError {
 }
 
 impl YtDlp {
-    /// Look up `yt-dlp` and `deno` on `PATH`. Returns `None` if `yt-dlp` is
-    /// missing — the caller decides whether that's fatal. A missing `deno`
-    /// is not fatal here; only YouTube extraction fails without it, and we
-    /// surface that as a runtime error per-resolution.
+    /// Discovers yt-dlp and Deno on PATH. Returns `None` only when yt-dlp is missing.
     pub fn detect() -> Option<Self> {
         let bin = which::which("yt-dlp").ok()?;
         let deno = which::which("deno").ok();
@@ -132,8 +115,7 @@ impl YtDlp {
                 return Err(YtDlpError::Timeout);
             }
         };
-        // The child and its output pipes completed normally. No cancellation
-        // cleanup remains, and the process group ID can now be reused.
+        // Completed output needs no cancellation cleanup; avoid signaling a reused group ID.
         #[cfg(unix)]
         {
             process_group.0 = None;
@@ -153,9 +135,7 @@ impl YtDlp {
                 .rfind(|l| l.starts_with("ERROR:"))
                 .map(str::to_string)
                 .unwrap_or_else(|| {
-                    // No `ERROR:` line — surface whatever stderr we got so the
-                    // failure isn't opaque (argparse errors, deno crashes,
-                    // proxy/CA issues all land here).
+                    // Preserve stderr for failures without yt-dlp's ERROR prefix.
                     let trimmed = stderr.trim();
                     if trimmed.is_empty() {
                         "yt-dlp exited non-zero (no stderr)".to_string()

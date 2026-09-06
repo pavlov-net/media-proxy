@@ -1,30 +1,4 @@
-//! Video dispatch: resolver → ffprobe → autocrop probe → ffmpeg →
-//! `VideoSource` frame channel.
-//!
-//! Flow for a `StartStream` pointing at a video URL:
-//!
-//! 1. `Resolver::resolve` yields a direct stream URL + HTTP headers.
-//!    For local files and already-direct media, the passthrough resolver
-//!    returns the input unchanged.
-//! 2. **ffprobe pre-pass** (bounded, best-effort) extracts source
-//!    dimensions, SAR, and rotation. On failure (timeout, no metadata)
-//!    we fall back to the target-only graph — no probe data, no autocrop,
-//!    Auto-fit degrades to Pad.
-//! 3. **Autocrop probe** (bounded, best-effort) when
-//!    `config.video.autocrop.enabled`: decode N small grayscale frames,
-//!    take per-edge median, map back to source coords.
-//! 4. Pick a hwaccel backend from `config.hw.prefer` intersected with
-//!    ffmpeg's reported `-hwaccels`.
-//! 5. Build the `-vf` chain with probed dims/SAR + autocrop rect so
-//!    Auto-fit can choose direct-scale and the crop filter can trim
-//!    letterboxes. Rotation is left to ffmpeg's auto-rotate (since 4.2);
-//!    we swap the probed dims for 90°/270° rotations so Auto-fit's
-//!    ratio comparison runs on display orientation.
-//! 6. Spawn ffmpeg with `-f rawvideo -pix_fmt rgb24` on stdout + showinfo
-//!    on stderr.
-//! 7. A conversion task drains the ffmpeg frame receiver, computes each
-//!    frame's display delay from consecutive PTS, and forwards `RgbFrame`s
-//!    into the `VideoSource` channel the runner consumes.
+//! Resolves video URLs, probes metadata and autocrop, and starts ffmpeg frame delivery.
 
 use std::sync::Arc;
 
@@ -42,8 +16,7 @@ use crate::video::probe::{self, VideoProbeData};
 use crate::video::subprocess::{FfmpegArgs, FfmpegFrame, FfmpegInput, spawn_ffmpeg};
 use crate::video::{hwaccel, timing};
 
-/// Fallback delay when neither PTS deltas nor an advertised fps are
-/// available — ≈ 30 fps.
+/// Fallback frame delay in milliseconds when PTS and frame rate are unavailable.
 const DEFAULT_FRAME_DELAY_MS: f32 = 33.333;
 
 pub async fn build_video_source(
@@ -73,12 +46,7 @@ pub async fn build_video_source(
     }
     let http_headers = format_http_headers(&resolved.headers);
 
-    // Source-aware pre-passes run in parallel: ffprobe metadata is
-    // independent of the autocrop decode pass, and only the final
-    // probe-rect → source-coords mapping needs both. Any failure
-    // (timeout, missing binary, no video stream) falls back to today's
-    // target-only behaviour, so live or unusual sources don't block
-    // stream startup.
+    // The probes are independent; mapping crop edges to source pixels needs both results.
     let metadata_fut = probe::probe_video_metadata(&resolved.stream_url, http_headers.as_deref());
     let (probe_data, raw_autocrop_rect) = if config.video.autocrop.enabled {
         let crop_fut = autocrop::probe_autocrop_rect(
@@ -102,9 +70,8 @@ pub async fn build_video_source(
     let hw_backend = hwaccel::pick_for(fields.hw);
     let filter_graph = build_filter_graph_for(fields, probe_data.as_ref(), autocrop_rect);
 
-    // `cache:` makes the input seekable so ffmpeg's `-stream_loop -1` can
-    // rewind in-place. For large or non-looping media, the orchestrator
-    // rebuilds the whole source from scratch instead.
+    // `cache:` permits in-process seeking for small looping files. Other looping
+    // videos restart through the orchestrator when ffmpeg reaches EOF.
     let input = if resolved.should_cache(
         fields.r#loop,
         config.youtube.cache.enabled,
@@ -130,9 +97,7 @@ pub async fn build_video_source(
         .fps
         .and_then(|fps| if fps > 0.0 { Some(1000.0 / fps) } else { None });
 
-    // MJPEG / jpeg_pipe streams advertise synthetic PTS that doesn't reflect
-    // real frame arrival. Force fixed-interval pacing for these so burst
-    // arrivals don't produce burst emits downstream.
+    // Synthetic MJPEG timestamps do not reflect arrival time; use fixed delays.
     let unreliable_pts = is_unreliable_pts(&fields.source);
 
     let (frame_tx, frame_rx) = mpsc::channel::<RgbFrame>(8);
@@ -145,10 +110,7 @@ pub async fn build_video_source(
     )))
 }
 
-/// URL-level heuristic for formats that deliver synthetic PTS (MJPEG over
-/// HTTP is the common case on IP cameras). Keeping this at the URL layer
-/// avoids a mid-stream probe; any stream URL that smells like MJPEG is
-/// treated as "trust fps, not PTS".
+/// Identifies MJPEG URLs whose synthetic PTS requires fixed frame delays.
 fn is_unreliable_pts(src_url: &str) -> bool {
     let lower = src_url.to_ascii_lowercase();
     lower.ends_with(".mjpeg") || lower.ends_with(".mjpg") || lower.contains("mjpg_streamer")
@@ -173,16 +135,8 @@ fn contains_control(s: &str) -> bool {
     s.bytes().any(|b| b == b'\r' || b == b'\n' || b < 0x20)
 }
 
-/// Build the `-vf` chain. When `probe` is available the graph runs in
-/// source-aware mode: Auto-fit can pick direct-scale (matching ratios)
-/// or fall through to Pad, the autocrop crop is applied first when a
-/// rect is supplied, and Auto-fit's ratio comparison uses display
-/// (post-rotation) dimensions.
-///
-/// Rotation is left to ffmpeg's auto-rotate (since 4.2) — we don't emit
-/// `transpose` filters ourselves to avoid double-rotating against the
-/// auto-rotate already applied at decode time. For 90°/270° sources we
-/// swap probed `(w, h)` so Auto-fit compares ratios in display space.
+/// Builds filters using display dimensions for aspect-ratio comparisons.
+/// ffmpeg applies rotation during decode; rotating here would apply it twice.
 fn build_filter_graph_for(
     fields: &StreamFields,
     probe: Option<&VideoProbeData>,
@@ -205,9 +159,7 @@ fn build_filter_graph_for(
     })
 }
 
-/// Consume ffmpeg frames, convert each into an `RgbFrame` with a computed
-/// display delay, and forward. Terminates when the upstream closes (ffmpeg
-/// exited) or the downstream closes (runner dropped the receiver).
+/// Converts PTS to frame delays until either channel closes.
 async fn convert_frames(
     mut src: mpsc::Receiver<FfmpegFrame>,
     dst: mpsc::Sender<RgbFrame>,
@@ -280,17 +232,12 @@ mod tests {
 
     #[test]
     fn graph_without_probe_falls_back_to_pad() {
-        // Auto-fit with no probe data must conservatively emit a Pad
-        // chain — without source dims we can't compare ratios for a
-        // direct scale.
         let g = build_filter_graph_for(&fields(64, 64, Fit::Auto), None, None);
         assert!(g.contains("pad=64:64"));
     }
 
     #[test]
     fn graph_with_matching_ratio_picks_direct_scale() {
-        // 1080×1080 source vs 64×64 target: identical ratios, so the
-        // filter graph should skip the pad/crop chain and direct-scale.
         let p = probe(1080, 1080, 1, 1, 0);
         let g = build_filter_graph_for(&fields(64, 64, Fit::Auto), Some(&p), None);
         assert!(!g.contains("pad="), "graph should not pad on matching ratio: {g}");
@@ -299,9 +246,7 @@ mod tests {
 
     #[test]
     fn graph_with_portrait_rotated_source_uses_display_dims() {
-        // Container is 1080×1920 coded but rotated 90°: display is
-        // 1920×1080 landscape. Against a 1920×1080 target Auto-fit
-        // should pick direct-scale based on display ratio.
+        // Rotation makes the portrait-coded source match the landscape target.
         let p = probe(1080, 1920, 1, 1, 90);
         let g = build_filter_graph_for(&fields(1920, 1080, Fit::Auto), Some(&p), None);
         assert!(

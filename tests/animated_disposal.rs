@@ -122,8 +122,7 @@ fn check_fixture(name: &str) {
             .zip(bytes.as_chunks::<4>().0.iter())
             .enumerate()
         {
-            // Transparent RGB is undefined. Allow one rounding unit
-            // for integer alpha compositors; never tolerate ghost pixels.
+            // RGB beneath zero alpha is undefined; integer alpha rounding permits one unit.
             assert!(
                 actual[3].abs_diff(expected[3]) <= 1,
                 "{name} frame {index} pixel {pixel}: {actual:?} != {expected:?}"
