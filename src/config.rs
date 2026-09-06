@@ -384,19 +384,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_final_python_config() {
-        // Captured from src/config.py at the parent of rewrite commit 2a88de2.
-        let expected: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/python-config-defaults.json")).unwrap();
-        // JSON serialization uses the shortest f32 representation, avoiding
-        // artificial f64 widening differences such as 0.6 -> 0.600000024.
-        let mut actual: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&Config::default()).unwrap()).unwrap();
-        actual.as_object_mut().unwrap().remove("resolver");
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn legacy_yaml_merges_nested_defaults_and_uppercase_logging() {
         let mut file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
         use std::io::Write;
@@ -416,6 +403,10 @@ mod tests {
         assert_eq!(c.video.expand_mode, 2);
         assert_eq!(c.video.fit, "auto");
         assert!(!c.video.autocrop.enabled);
+        assert_eq!(c.video.autocrop.probe_frames, 24);
+        assert_eq!(c.video.autocrop.luma_thresh, 16);
+        assert_eq!(c.video.autocrop.max_bar_ratio, 0.15);
+        assert_eq!(c.video.autocrop.min_bar_px, 2);
         assert!(c.playback.r#loop);
         assert!(c.youtube.prefer_60fps);
         assert!(c.youtube.cache.enabled);
@@ -423,12 +414,24 @@ mod tests {
         assert_eq!(c.image.method, "lanczos");
         assert!(!c.image.gamma_correct);
         assert!(c.image.color_correction);
+        assert_eq!(c.image.unsharp.amount, 0.0);
+        assert_eq!(c.image.unsharp.radius, 0.6);
+        assert_eq!(c.image.unsharp.threshold, 2);
         assert_eq!(c.image.frame_cache_mb, 32);
         assert_eq!(c.image.frame_cache_min_frames, 5);
+        assert!(!c.log.send_ms);
+        assert_eq!(c.log.level, LogLevel::Info);
+        assert!(c.log.metrics);
         assert_eq!(c.log.rate_ms, 5000);
         assert!(c.net.win_timer_res);
         assert!(c.net.spread_packets);
         assert_eq!(c.net.spread_max_fps, 60);
+        assert_eq!(c.net.spread_min_ms, 3.0);
+        assert_eq!(c.net.spread_max_sleeps, 0);
+        assert_eq!(
+            c.net.user_agent,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+        );
         assert_eq!(c.playback_still.redundancy, 3);
         assert!(c.resolver.url.is_none());
         assert_eq!(c.resolver.timeout_ms, 30_000);

@@ -2,7 +2,6 @@
 
 Containers are assembled directly to guarantee subrects and disposal flags;
 FFmpeg is not used. Expected compositing uses Pillow on the raw subframes.
-The legacy_rgb capture reproduces Python media-proxy's extra compositing step.
 """
 import io
 import json
@@ -42,35 +41,6 @@ def reference(frames):
         elif f['dispose'] == 'previous':
             canvas = before
     return output
-
-
-def black_rgb(image):
-    bg = rgba(W, H, (0, 0, 0, 255))
-    bg.alpha_composite(image)
-    return bg.convert('RGB').tobytes()
-
-
-def capture_legacy(data, skip_default=False):
-    result = []
-    canvas = rgba(W, H, (0, 0, 0, 255))
-    with Image.open(io.BytesIO(data)) as image:
-        for i in range(int(skip_default), image.n_frames):
-            image.seek(i)
-            image.load()
-            disposal = getattr(image, 'disposal_method', None)
-            disposal = {0: 0, 1: 0, 2: 1, 3: 2}.get(disposal, image.info.get('disposal', 0))
-            before = canvas.copy()
-            patch = image.convert('RGBA')
-            if getattr(image, 'blend_op', 1) == 0:
-                canvas.paste(patch, (0, 0))
-            else:
-                canvas.paste(patch, (0, 0), patch)
-            result.append(black_rgb(canvas).hex())
-            if disposal == 1:
-                canvas = rgba(W, H, (0, 0, 0, 255))
-            elif disposal == 2:
-                canvas = before
-    return result
 
 
 def png_chunk(kind, data):
@@ -204,23 +174,17 @@ rgba16 = [frame(0, 0, rgba(W, H, (64, 96, 192, 255)), blend='source'),
           frame(4, 0, rgba(2, 2, (32, 192, 64, 255)), dispose='background'),
           frame(0, 0, rgba(W, H, CLEAR)),
           frame(2, 2, rgba(2, 2, (96, 32, 192, 128)), blend='source')]
-fixtures = [('disposal.gif', gif(opaque), opaque, False),
-            ('disposal.apng', apng(opaque), opaque, False),
-            ('alpha.apng', apng(alpha), alpha, False),
-            ('default-image.apng', apng(opaque, separate=True), opaque, True),
-            ('disposal.webp', webp(webp_frames), webp_frames, False),
-            ('alpha.webp', webp(alpha), alpha, False),
-            ('disposal-edges.webp', webp(webp_edges), webp_edges, False),
-            ('palette-holes.gif', gif(gif_holes), gif_holes, False),
-            ('grayscale-alpha.apng', apng(gray, color_type=4), gray, False),
-            ('rgba16.apng', apng(rgba16, depth=16), rgba16, False)]
-for name, data, frames, separate in fixtures:
+fixtures = [('disposal.gif', gif(opaque), opaque),
+            ('disposal.apng', apng(opaque), opaque),
+            ('alpha.apng', apng(alpha), alpha),
+            ('default-image.apng', apng(opaque, separate=True), opaque),
+            ('disposal.webp', webp(webp_frames), webp_frames),
+            ('alpha.webp', webp(alpha), alpha),
+            ('disposal-edges.webp', webp(webp_edges), webp_edges),
+            ('palette-holes.gif', gif(gif_holes), gif_holes),
+            ('grayscale-alpha.apng', apng(gray, color_type=4), gray),
+            ('rgba16.apng', apng(rgba16, depth=16), rgba16)]
+for name, data, frames in fixtures:
     (ROOT / name).write_bytes(data)
     expected = reference(frames)
-    legacy = capture_legacy(data, separate)
-    for f, old in zip(expected, legacy):
-        f['legacy_rgb'] = old
     (ROOT / (name + '.json')).write_text(json.dumps(dict(width=W, height=H, frames=expected), indent=2) + '\n')
-    matches = sum(black_rgb(Image.frombytes('RGBA', (W, H), bytes.fromhex(f['rgba']))).hex() == old
-                  for f, old in zip(expected, legacy))
-    print(name, 'legacy matches', matches, '/', len(frames))

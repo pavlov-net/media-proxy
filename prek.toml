@@ -1,4 +1,3 @@
-exclude = "^vendor/"
 
 [[repos]]
 repo = "builtin"

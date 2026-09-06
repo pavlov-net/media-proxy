@@ -64,12 +64,10 @@ fast_image_resize = { version = "6", features = ["image"] }
 lcms2 = { version = "6", features = ["static"] }
 infer = { version = "0.22", default-features = false }
 
-# Animated WebP uses a narrow upstream fork for disposal fixes; provenance
-# and the two local changes are documented in vendor/image-webp/PATCHES.md.
 gif = "0.14"
 gif-dispose = "6"
 png = "0.18"
-image-webp = { path = "vendor/image-webp" }
+image-webp = "0.2.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media"] }

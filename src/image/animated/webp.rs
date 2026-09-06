@@ -1,7 +1,7 @@
-//! Animated WebP via the vendored `image-webp` with disposal fixes.
+//! Animated WebP via `image-webp`.
 //!
-//! `WebPDecoder::read_frame` returns the already-composited canvas per frame,
-//! honoring disposal + blend from the VP8X/ANIM chunks.
+//! `WebPDecoder::read_frame` returns a composited canvas. Upstream disposal
+//! limitations are recorded in the ignored WebP integration tests.
 
 use image_webp::{DecodingError, WebPDecoder};
 

@@ -1216,21 +1216,13 @@ dependencies = [
  "byteorder-lite",
  "color_quant",
  "gif",
- "image-webp 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
  "zune-core",
  "zune-jpeg",
-]
-
-[[package]]
-name = "image-webp"
-version = "0.2.4"
-dependencies = [
- "byteorder-lite",
- "quick-error 2.0.1",
 ]
 
 [[package]]
@@ -1434,7 +1426,7 @@ dependencies = [
  "gif",
  "gif-dispose",
  "image",
- "image-webp 0.2.4",
+ "image-webp",
  "infer",
  "lcms2",
  "parking_lot",
