@@ -5,11 +5,16 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, ValueEnum, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
+    #[serde(alias = "DEBUG")]
     Debug,
     #[default]
+    #[serde(alias = "INFO")]
     Info,
+    #[serde(alias = "WARNING", alias = "warn", alias = "WARN")]
     Warning,
+    #[serde(alias = "ERROR")]
     Error,
+    #[serde(alias = "CRITICAL")]
     Critical,
 }
 

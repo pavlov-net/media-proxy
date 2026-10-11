@@ -43,7 +43,7 @@ pub fn render_bbcode_text(
     default_fg: [u8; 3],
     bg: [u8; 3],
 ) -> Result<RenderOutput, RenderError> {
-    let runs = parse(text, default_fg);
+    let runs = logical_lines(parse(text, default_fg));
     let mut pixels = build_background(width, height, bg);
     let mut canvas = Canvas {
         pixels: &mut pixels,
@@ -80,6 +80,35 @@ pub fn render_bbcode_text(
         width,
         height,
     })
+}
+
+// The Python renderer groups style segments until a newline or alignment
+// change, then uses the first segment's style for that line. Preserve this
+// layout: an inline color/font tag must not move the remaining text down.
+fn logical_lines(runs: Vec<Run>) -> Vec<Run> {
+    let mut lines = Vec::new();
+    let mut current: Option<Run> = None;
+    for run in runs {
+        for (i, part) in run.text.split('\n').enumerate() {
+            if (i > 0 || current.as_ref().is_some_and(|line| line.align != run.align))
+                && let Some(line) = current.take()
+            {
+                lines.push(line);
+            }
+            if let Some(line) = &mut current {
+                line.text.push_str(part);
+            } else {
+                current = Some(Run {
+                    text: part.to_string(),
+                    ..run.clone()
+                });
+            }
+        }
+    }
+    if let Some(line) = current {
+        lines.push(line);
+    }
+    lines
 }
 
 fn build_background(width: u32, height: u32, bg: [u8; 3]) -> Vec<u8> {
@@ -258,6 +287,11 @@ impl Parser {
                 }
                 true
             }
+            other if closing && parse_color(other).is_some() => {
+                self.flush();
+                pop_if(&mut self.color_stack);
+                true
+            }
             other if !closing => {
                 if let Some(rgb) = parse_color(other) {
                     self.flush();
@@ -291,7 +325,13 @@ mod tests {
         assert_eq!(out.height, 16);
         assert_eq!(out.rgb888.len(), (64 * 16 * 3) as usize);
         // Has at least one white pixel from the glyph blitter.
-        assert!(out.rgb888.chunks_exact(3).any(|p| p == [255, 255, 255]));
+        assert!(
+            out.rgb888
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|p| p == &[255, 255, 255])
+        );
     }
 
     #[test]
@@ -300,9 +340,22 @@ mod tests {
         // Some red pixels should be present.
         assert!(
             out.rgb888
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .any(|p| p[0] == 255 && p[1] == 0 && p[2] == 0)
         );
+    }
+
+    #[test]
+    fn inline_styles_do_not_insert_lines_and_named_colors_close() {
+        let styled = render_bbcode_text("[red]hello[/red] world", 64, 8, [255; 3], [0; 3]).unwrap();
+        let baseline = render_bbcode_text("[red]hello world[/red]", 64, 8, [255; 3], [0; 3]).unwrap();
+        assert_eq!(styled.rgb888, baseline.rgb888);
+        let runs = parse("[red]x[/red]y", [255; 3]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1].text, "y");
+        assert_eq!(runs[1].color, [255; 3]);
     }
 
     #[test]
@@ -310,6 +363,12 @@ mod tests {
         // `[img]` isn't a recognized tag — render as text.
         let out = render_bbcode_text("[img]", 64, 16, [255, 255, 255], [0, 0, 0]).unwrap();
         // Any white pixel means something was rendered (the literal `[img]`).
-        assert!(out.rgb888.chunks_exact(3).any(|p| p == [255, 255, 255]));
+        assert!(
+            out.rgb888
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|p| p == &[255, 255, 255])
+        );
     }
 }

@@ -192,7 +192,12 @@ pub fn composite_rgba_to_rgb888(rgba: &[u8], plan: &CompositePlan) -> Vec<u8> {
 fn composite_row_over_black(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len() % 4, 0);
     debug_assert_eq!(dst.len(), src.len() / 4 * 3);
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(3)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<3>().0.iter_mut())
+    {
         let a = s[3];
         if a == 255 {
             d[0] = s[0];

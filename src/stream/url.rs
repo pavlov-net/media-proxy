@@ -148,7 +148,10 @@ impl UrlKind {
     /// True if the resolver can short-circuit — the URL already points at
     /// direct media and doesn't need yt-dlp.
     pub fn is_direct_media(&self) -> bool {
-        matches!(self, Self::LocalPath(_) | Self::DirectImage | Self::DirectVideo)
+        matches!(
+            self,
+            Self::LocalPath(_) | Self::DirectImage | Self::DirectVideo | Self::StreamingProtocol(_)
+        )
     }
 }
 

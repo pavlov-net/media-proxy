@@ -51,16 +51,26 @@ pub async fn build_video_source(
     config: &Config,
     resolver: &Arc<dyn Resolver>,
 ) -> Result<FrameSource, StreamError> {
-    let resolved = resolver
+    let mut resolved = resolver
         .resolve(ResolveRequest {
             url: fields.source.clone(),
             target_w: fields.width,
             target_h: fields.height,
-            hw_prefer: fields.hw.as_canon().map(str::to_string),
+            hw_prefer: Some(fields.hw.as_canon().unwrap_or("none").to_string()),
             prefer_60fps: config.youtube.prefer_60fps,
         })
         .await?;
 
+    if (resolved.stream_url.starts_with("http://") || resolved.stream_url.starts_with("https://"))
+        && !resolved
+            .headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("user-agent"))
+    {
+        resolved
+            .headers
+            .insert("User-Agent".into(), config.net.user_agent.clone());
+    }
     let http_headers = format_http_headers(&resolved.headers);
 
     // Source-aware pre-passes run in parallel: ffprobe metadata is

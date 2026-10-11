@@ -17,7 +17,7 @@ pub enum ClientMsg {
     StopStream(StopStream),
     Update(UpdateStream),
     Ping {
-        t: Option<i64>,
+        t: Option<Value>,
     },
 }
 
@@ -33,7 +33,7 @@ pub enum ServerMsg {
         applied: Option<AppliedParams>,
     },
     Pong {
-        t: Option<i64>,
+        t: Option<Value>,
     },
     Error(ErrorMsg),
 }

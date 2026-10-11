@@ -1,7 +1,7 @@
-//! Animated WebP via `image-webp` (git `main` pin for post-#179 fixes).
+//! Animated WebP via `image-webp`.
 //!
-//! `WebPDecoder::read_frame` returns the already-composited canvas per frame,
-//! honoring disposal + blend from the VP8X/ANIM chunks.
+//! `WebPDecoder::read_frame` returns a composited canvas. Upstream disposal
+//! limitations are recorded in the ignored WebP integration tests.
 
 use image_webp::{DecodingError, WebPDecoder};
 
@@ -36,7 +36,10 @@ impl WebpDecoder {
         } else {
             None
         };
-        let buf = vec![0u8; (pixels * 4) as usize];
+        let size = decoder
+            .output_buffer_size()
+            .ok_or_else(|| ImageError::Decode("webp: output buffer too large".into()))?;
+        let buf = vec![0u8; size];
         Ok(Self {
             decoder,
             width,
@@ -93,11 +96,37 @@ impl WebpDecoder {
     /// fresh allocation. `read_frame` / `read_image` fully overwrite the
     /// buffer on the next call, so we don't need to preserve its contents.
     fn take_buf(&mut self) -> Vec<u8> {
-        let cap = self.buf.len();
-        std::mem::replace(&mut self.buf, vec![0u8; cap])
+        if self.decoder.has_alpha() {
+            let cap = self.buf.len();
+            std::mem::replace(&mut self.buf, vec![0u8; cap])
+        } else {
+            let mut rgba = Vec::with_capacity(self.width as usize * self.height as usize * 4);
+            for pixel in self.buf.as_chunks::<3>().0.iter() {
+                rgba.extend_from_slice(pixel);
+                rgba.push(255);
+            }
+            rgba
+        }
     }
 }
 
 fn webp_err(e: DecodingError) -> ImageError {
     ImageError::Decode(format!("webp: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::ImageEncoder;
+
+    #[test]
+    fn opaque_webp_expands_rgb_to_rgba() {
+        let mut data = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut data)
+            .write_image(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut decoder = WebpDecoder::new(data, "test").unwrap();
+        assert_eq!(decoder.next_frame().unwrap().unwrap().rgba, [255, 0, 0, 255]);
+        assert!(decoder.next_frame().unwrap().is_none());
+    }
 }

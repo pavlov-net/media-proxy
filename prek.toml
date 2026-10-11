@@ -1,3 +1,4 @@
+
 [[repos]]
 repo = "builtin"
 hooks = [
@@ -16,7 +17,7 @@ repo = "local"
 id = "cargo-fmt"
 name = "cargo fmt --check"
 language = "system"
-entry = "cargo fmt --all -- --check"
+entry = "cargo fmt --package media-proxy -- --check"
 pass_filenames = false
 types = ["rust"]
 

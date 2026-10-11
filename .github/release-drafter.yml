@@ -8,23 +8,6 @@ categories:
     labels:
       - "dependencies"
 
-version-resolver:
-  major:
-    labels:
-      - "major"
-      - "breaking-change"
-  minor:
-    labels:
-      - "minor"
-      - "new-feature"
-  patch:
-    labels:
-      - "bugfix"
-      - "dependencies"
-      - "documentation"
-      - "enhancement"
-  default: patch
-
 template: |
   ## What's Changed
 

@@ -19,7 +19,7 @@ Available as a Home Assistant add-on or standalone Rust binary.
 
 ## Requirements
 
-- Rust 1.95+ (edition 2024) — only needed to build from source
+- Rust 1.98.1+ (edition 2024) — only needed to build from source
 - `ffmpeg` on `PATH` for video sources
 - Network access to your displays (UDP, typically port 4048)
 
@@ -310,54 +310,7 @@ ws.onmessage = (event) => {
 
 ## HTTP REST API
 
-Media Proxy provides HTTP REST endpoints for media conversion and placeholder image generation.
-
-### POST `/api/convert/animimg`
-
-Extracts frames from videos, GIFs, or images and packages them as a ZIP file optimized for ESPHome LVGL animimg widgets.
-
-**Request body (JSON):**
-```json
-{
-  "source": "https://example.com/video.mp4",
-  "width": 64,
-  "height": 64,
-  "frame_limit": 100,
-  "fps_limit": 10,
-  "fit": "cover"
-}
-```
-
-**Parameters:**
-- `source` *(required)*: URL or local path to video/image/GIF
-- `width` *(required)*: Target width in pixels
-- `height` *(required)*: Target height in pixels
-- `frame_limit` *(optional)*: Maximum frames to extract (default: 100)
-- `fps_limit` *(optional)*: Maximum FPS for output (default: source FPS)
-- `fit` *(optional)*: Resize mode - `cover` or `pad` (default: `cover`)
-
-**Response:** ZIP file containing:
-- Individual frame images (`frame_001.png`, `frame_002.png`, etc.)
-- `animimg_config.yaml` - ESPHome configuration template
-- `README.txt` - Integration instructions
-
-### Example Usage
-
-**Convert an animated GIF to ESPHome animimg format:**
-```bash
-curl -X POST http://localhost:8788/api/convert/animimg \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source": "https://upload.wikimedia.org/wikipedia/commons/2/2c/Rotating_earth_%28large%29.gif",
-    "width": 64,
-    "height": 64,
-    "frame_limit": 50,
-    "fit": "cover"
-  }' \
-  --output rotating_earth.zip
-```
-
-The resulting ZIP file contains individual PNG frames and an ESPHome configuration template ready for integration with LVGL animimg widgets.
+Media Proxy provides HTTP endpoints for health checks and placeholder image generation.
 
 ### GET `/api/internal/placeholder/{spec}`
 
@@ -425,3 +378,15 @@ See: [lvgl-ddp-stream](https://github.com/stuartparmenter/lvgl-ddp-stream) for E
   - **Device not receiving frames:** Check UDP reachability and that pixel format matches your device.
 
 ---
+
+## Rust compatibility checks
+
+Run `cargo test --locked --all-targets` and, after `cargo build --locked --bins`,
+`python3 tests/smoke.py --binary target/debug/media-proxy` (requires FFmpeg).
+Tests compare all retained Python configuration defaults, animated disposal and
+cached frame output, and real HTTP/WebSocket/DDP behavior. See
+[the disposal fixture notes](tests/fixtures/animated/README.md) for reference details.
+
+Home Assistant entity/template drawing was intentionally removed in the Rust
+rewrite (`/api/internal/homeassistant/*` returns 501). The animimg frame-to-ZIP
+utility has also been removed; it is outside the streaming service's scope.

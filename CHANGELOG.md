@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Rust cutover
+- Pin Rust 1.98.1 and retain the Python configuration defaults and ddp-esphome control/DDP formats.
+- Fix animated disposal/blending, opaque WebP decoding, paced playback, and external resolver edge cases.
+- Add independent disposal goldens and tests of the actual server and UDP output.
+- Remove the animimg ZIP utility. Home Assistant entity/template drawing remains intentionally removed.
+- Remove the mandatory AVX2 build baseline; standalone Linux binaries are prepared separately.
+
 ### Added
 - winloop for improved async performance on Windows (~5x faster event loop vs default)
 - Physical packet send tracking with microsecond-precision timing for accurate metrics during redundancy

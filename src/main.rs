@@ -16,7 +16,7 @@ struct Cli {
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, ignore_case = true)]
     log_level: Option<telemetry::LogLevel>,
 }
 

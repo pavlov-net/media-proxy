@@ -252,7 +252,7 @@ fn decode_to_rgb888(data: &[u8], pixel_cfg: u8) -> Vec<u8> {
 
 fn decode_565(data: &[u8], be: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() / 2 * 3);
-    for chunk in data.chunks_exact(2) {
+    for chunk in data.as_chunks::<2>().0 {
         let v = if be {
             u16::from_be_bytes([chunk[0], chunk[1]])
         } else {

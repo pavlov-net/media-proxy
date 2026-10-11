@@ -46,19 +46,37 @@ pub async fn probe(url: &str, user_agent: &str) -> MediaKind {
     }
 }
 
-async fn probe_http(url: &str, user_agent: &str) -> Option<MediaKind> {
-    let resp = CLIENT
-        .head(url)
-        .header(reqwest::header::USER_AGENT, user_agent)
-        .timeout(HEAD_TIMEOUT)
-        .send()
-        .await
-        .ok()?;
-    let ct = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())?;
-    classify_content_type(ct)
+pub(crate) async fn probe_http(url: &str, user_agent: &str) -> Option<MediaKind> {
+    tokio::time::timeout(HEAD_TIMEOUT, async {
+        let response = CLIENT
+            .head(url)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .send()
+            .await
+            .ok()?;
+        // Some cameras reject HEAD. Read only GET headers, even if the
+        // server ignores Range and starts an unbounded stream.
+        let response = if matches!(response.status().as_u16(), 405 | 501) {
+            CLIENT
+                .get(url)
+                .header(reqwest::header::USER_AGENT, user_agent)
+                .header(reqwest::header::RANGE, "bytes=0-0")
+                .send()
+                .await
+                .ok()?
+        } else {
+            response
+        };
+        let ct = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)?
+            .to_str()
+            .ok()?;
+        classify_content_type(ct)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn probe_file(parsed: &Url) -> Option<MediaKind> {
@@ -74,7 +92,7 @@ async fn probe_file(parsed: &Url) -> Option<MediaKind> {
     }
 }
 
-fn classify_content_type(ct: &str) -> Option<MediaKind> {
+pub(crate) fn classify_content_type(ct: &str) -> Option<MediaKind> {
     let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     // IP-camera MJPEG and similar pushed-frames streams: `.jpg`-extension
     // URL but the response is a multipart stream that ffmpeg handles.
@@ -125,6 +143,45 @@ fn fallback(url: &str) -> MediaKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn get_only_media_resolves_without_reading_body_or_using_extractor() {
+        use crate::resolver::{NoopResolver, PassthroughLayer, ResolveRequest, Resolver};
+        use axum::{Router, body::Body, http::HeaderMap, routing::get};
+
+        let router = Router::new().route(
+            "/stream",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers["user-agent"], "probe-test");
+                assert_eq!(headers["range"], "bytes=0-0");
+                let body =
+                    Body::from_stream(futures::stream::pending::<Result<bytes::Bytes, std::io::Error>>());
+                ([("content-type", "video/mp4")], body)
+            })
+            .head(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/stream", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+            assert_eq!(probe(&url, "probe-test").await, MediaKind::Video);
+            let resolver = PassthroughLayer::new(Box::new(NoopResolver), "probe-test".into());
+            let result = resolver
+                .resolve(ResolveRequest {
+                    url: url.clone(),
+                    target_w: 16,
+                    target_h: 16,
+                    hw_prefer: None,
+                    prefer_60fps: false,
+                })
+                .await
+                .unwrap();
+            assert_eq!(result.stream_url, url);
+        })
+        .await;
+        server.abort();
+        outcome.expect("classification must not wait for the response body");
+    }
 
     #[test]
     fn ct_mjpeg_is_video() {
