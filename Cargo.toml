@@ -73,7 +73,7 @@ png = "0.18"
 image-webp = { git = "https://github.com/image-rs/image-webp", branch = "main" }
 
 # REST / animimg (Phase 1)
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media"] }
