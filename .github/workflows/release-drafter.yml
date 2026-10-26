@@ -9,37 +9,40 @@ permissions:
   contents: write
   pull-requests: write
 
+# One run at a time, so a queued run sees the previous run's version-bump commit.
+concurrency:
+  group: release-drafter
+  cancel-in-progress: false
+
 jobs:
   release-drafter:
     name: Release Drafter
-    environment: release-drafter
     runs-on: ubuntu-latest
     steps:
       - uses: release-drafter/release-drafter@978bb0b30c5ee8cdd332ced253758157150d43f0 # v7.10.0
         id: drafter
+
+      # Install cargo-edit before checkout: it may build from source, and the repo's
+      # .cargo/config.toml links with mold, which this runner doesn't have.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04
+
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-edit
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.RELEASE_TOKEN }}
+          ref: ${{ github.ref }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: "1.95"
-
-      - name: Install cargo-edit
-        run: cargo install --locked cargo-edit
-
-      - name: Bump Cargo.toml + Cargo.lock
-        run: cargo set-version ${{ steps.drafter.outputs.resolved_version }}
-
-      - name: Commit changes
+      - name: Bump version
+        env:
+          VERSION: ${{ steps.drafter.outputs.resolved_version }}
         run: |
-          if ! git diff --quiet; then
-            git config --global user.name "github-actions[bot]"
-            git config --global user.email "github-actions[bot]@users.noreply.github.com"
-            git commit -am "Bump version to ${{ steps.drafter.outputs.resolved_version }}"
+          cargo set-version "$VERSION"
+          git add Cargo.toml Cargo.lock
+          if ! git diff --cached --quiet; then
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "Bump version to $VERSION [skip ci]"
             git push
           fi
