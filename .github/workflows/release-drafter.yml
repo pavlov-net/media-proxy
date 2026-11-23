@@ -27,7 +27,7 @@ jobs:
       # .cargo/config.toml links with mold, which this runner doesn't have.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2026-04
 
-      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-edit
 
@@ -41,7 +41,7 @@ jobs:
           VERSION: ${{ steps.drafter.outputs.resolved_version }}
         run: cargo set-version "$VERSION"
 
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app-token
         with:
           client-id: ${{ vars.RELEASE_DRAFTER_CLIENT_ID }}
